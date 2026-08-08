@@ -87,6 +87,10 @@ interface WeightEditForm {
   prices: number[];
 }
 
+type DateRangeBounds = Pick<Filters, "startDate" | "endDate">;
+type QuickRangeKey = "thisMonth" | "lastMonth" | "last3Months" | "allTime" | "custom";
+type FetchMode = "dateRange" | "all";
+
 // Constants
 const PAGE_LIMIT = 15;
 
@@ -106,7 +110,7 @@ const parseExcelSerialDate = (value: number): Date | null => {
 
 const parseDate = (date: any): Date | null => {
   if (!date) return null;
-  
+
   try {
     if (date instanceof Date) {
       return isNaN(date.getTime()) ? null : date;
@@ -120,9 +124,9 @@ const parseDate = (date: any): Date | null => {
       const parsed = new Date(timestamp);
       return isNaN(parsed.getTime()) ? null : parsed;
     }
-    
+
     let trimmed = String(date).trim();
-    
+
     // Normalize ISO strings with timestamps (e.g., from Edit Form) to avoid timezone day-shifting
     const fullIsoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T/);
     if (fullIsoMatch) {
@@ -162,7 +166,7 @@ const parseDate = (date: any): Date | null => {
   } catch (error) {
     console.error('Error parsing date:', error, date);
   }
-  
+
   return null;
 };
 
@@ -194,12 +198,69 @@ const formatDateToLocal = (date: Date): string => {
   return `${year}-${month}-${day}`;
 };
 
-const getCurrentMonthDates = () => {
+const getCurrentMonthDates = (): DateRangeBounds => {
   const now = new Date();
   return {
     startDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth(), 1)),
     endDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
   };
+};
+
+const getDefaultOfftakeFetchDates = (): DateRangeBounds => {
+  return getCurrentMonthDates();
+};
+
+const createDefaultFilters = (defaultDates: DateRangeBounds = getDefaultOfftakeFetchDates()): Filters => {
+  return {
+    search: "",
+    startDate: defaultDates.startDate,
+    endDate: defaultDates.endDate,
+    region: "all",
+    gender: "all",
+  };
+};
+
+// Returns the date bounds for a quick-range preset. Always computed fresh (never memoized)
+// so every call reflects "now" and produces a new object reference, which matters for
+// forcing React state updates even when the resulting values happen to be unchanged.
+const getQuickRangeDates = (key: QuickRangeKey): DateRangeBounds | null => {
+  const now = new Date();
+  switch (key) {
+    case "thisMonth":
+      return getCurrentMonthDates();
+    case "lastMonth":
+      return {
+        startDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth() - 1, 1)),
+        endDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth(), 0)),
+      };
+    case "last3Months":
+      return {
+        startDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth() - 2, 1)),
+        endDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
+      };
+    case "allTime":
+      return {
+        startDate: "2000-01-01",
+        endDate: formatDateToLocal(new Date(now.getFullYear() + 1, 11, 31)),
+      };
+    default:
+      return null;
+  }
+};
+
+// Widens a fetch window to include newly requested bounds instead of overwriting it.
+// This guarantees that whichever date range the user asks for (via manual inputs or the
+// quick-range picker) is always covered by the live Firebase subscription, so the fetched
+// dataset - and therefore the stats derived from it - actually changes when filters change.
+const unionDateRange = (base: DateRangeBounds, addStart?: string, addEnd?: string): DateRangeBounds => {
+  let { startDate, endDate } = base;
+  if (addStart) {
+    if (!startDate || addStart < startDate) startDate = addStart;
+  }
+  if (addEnd) {
+    if (!endDate || addEnd > endDate) endDate = addEnd;
+  }
+  return { startDate, endDate };
 };
 
 const parseDateInputValue = (value: string): Date | null => {
@@ -378,21 +439,25 @@ function safeTruncate(value: string | number) {
 interface FilterSectionProps {
   localSearchInput: string;
   filters: Filters;
+  quickRange: QuickRangeKey;
   uniqueRegions: string[];
   uniqueGenders: string[];
   onSearchChange: (value: string) => void;
   onFilterChange: (key: keyof Filters, value: string) => void;
+  onQuickRangeChange: (value: QuickRangeKey) => void;
 }
 
 const FilterSection = memo(({
   localSearchInput,
   filters,
+  quickRange,
   uniqueRegions,
   uniqueGenders,
   onSearchChange,
-  onFilterChange
+  onFilterChange,
+  onQuickRangeChange
 }: FilterSectionProps) => (
-  <ScrollableFilterBar ariaLabel="Livestock offtake filters" contentClassName="sm:grid-cols-2 lg:grid-cols-5">
+  <ScrollableFilterBar ariaLabel="Livestock offtake filters" contentClassName="sm:grid-cols-2 lg:grid-cols-6">
     <div className="w-[240px] shrink-0 space-y-2 sm:w-auto">
       <Label htmlFor="search" className="font-semibold text-gray-700">Search</Label>
       <Input
@@ -402,6 +467,22 @@ const FilterSection = memo(({
         onChange={(e) => onSearchChange(e.target.value)}
         className="border-gray-300 focus:border-blue-500 bg-white"
       />
+    </div>
+
+    <div className="w-[170px] shrink-0 space-y-2 sm:w-auto">
+      <Label htmlFor="quickRange" className="font-semibold text-gray-700">Date Range</Label>
+      <Select value={quickRange} onValueChange={(value) => onQuickRangeChange(value as QuickRangeKey)}>
+        <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="thisMonth">This Month</SelectItem>
+          <SelectItem value="lastMonth">Last Month</SelectItem>
+          <SelectItem value="last3Months">Last 3 Months</SelectItem>
+          <SelectItem value="allTime">All Time</SelectItem>
+          <SelectItem value="custom">Custom</SelectItem>
+        </SelectContent>
+      </Select>
     </div>
 
     <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
@@ -491,7 +572,7 @@ const LivestockOfftakePage = () => {
   const { userRole, userAttribute, allowedProgrammes } = useAuth();
   const { toast } = useToast();
   const auth = getAuth();
-  
+
   // State
   const [allOfftake, setAllOfftake] = useState<OfftakeData[]>([]);
   const [filteredOfftake, setFilteredOfftake] = useState<OfftakeData[]>([]);
@@ -518,19 +599,20 @@ const LivestockOfftakePage = () => {
   const [bulkSmsSending, setBulkSmsSending] = useState(false);
   const [uploadFile, setUploadFile] = useState<File[] | null>(null);
 
-  const currentMonth = useMemo(getCurrentMonthDates, []);
-  
-  const [filters, setFilters] = useState<Filters>({
-    search: "",
-    startDate: "",
-    endDate: "",
-    region: "all",
-    gender: "all"
+  const [filters, setFilters] = useState<Filters>(() => {
+    return createDefaultFilters();
   });
-  const [fetchRange, setFetchRange] = useState<Pick<Filters, "startDate" | "endDate">>(currentMonth);
+  // fetchRange represents the window actually requested from Firebase. It includes
+  // only the current month by default to avoid expensive all-time reads, widens as
+  // users request older dates, and only fetches all data when explicitly requested.
+  const [fetchRange, setFetchRange] = useState<DateRangeBounds>(() => getDefaultOfftakeFetchDates());
+  const [fetchMode, setFetchMode] = useState<FetchMode>("dateRange");
+  const [quickRange, setQuickRange] = useState<QuickRangeKey>("thisMonth");
+  const [filterResetKey, setFilterResetKey] = useState(0);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const processedKeysRef = useRef<Set<string>>(new Set());
+  const skipNextSearchDebounceRef = useRef(false);
 
   const [stats, setStats] = useState<Stats>({
     totalRegions: 0,
@@ -582,7 +664,7 @@ const LivestockOfftakePage = () => {
     allowAll: true,
     fallbackToAll: true,
   });
-  
+
   const requireAdmin = () => {
     if (userIsAdmin) return true;
     toast({
@@ -595,6 +677,11 @@ const LivestockOfftakePage = () => {
 
   // Debounce Search Input
   useEffect(() => {
+    if (skipNextSearchDebounceRef.current) {
+      skipNextSearchDebounceRef.current = false;
+      return;
+    }
+
     const delay = setTimeout(() => {
       setFilters(prev => ({ ...prev, search: localSearchInput }));
       setPagination(prev => ({ ...prev, page: 1 }));
@@ -810,13 +897,13 @@ const LivestockOfftakePage = () => {
       return;
     }
 
-    const queryStartDate = fetchRange.startDate || currentMonth.startDate;
-    const queryEndDate = fetchRange.endDate || currentMonth.endDate;
+    const queryStartDate = fetchRange.startDate;
+    const queryEndDate = fetchRange.endDate;
 
     setLoading(true);
     setAllOfftake([]);
 
-    const handleData = (data: Record<string, any> | null) => {
+    const handleMergedData = (data: Record<string, any> | null) => {
       if (!data || Object.keys(data).length === 0) {
         setAllOfftake([]);
         setLoading(false);
@@ -857,19 +944,43 @@ const LivestockOfftakePage = () => {
       setLoading(false);
     };
 
-    const unsubscribe = subscribeCollectionByProgrammes<Record<string, any>>("offtakes", programmeValues, handleData, (error) => {
+    const handleError = (error: Error) => {
       console.error(error);
       toast({ title: "Error", description: "Failed to load database stream.", variant: "destructive" });
       setLoading(false);
-    }, {
-      dateField: "date",
-      dateValueType: "date-string",
-      startDate: queryStartDate,
-      endDate: queryEndDate,
-    });
+    };
 
-    return () => { if (typeof unsubscribe === 'function') unsubscribe(); };
-  }, [accessibleProgrammes, activeProgram, currentMonth.endDate, currentMonth.startDate, fetchRange.endDate, fetchRange.startDate, toast, userCanViewAllProgrammeData]);
+    const unsubscribers = fetchMode === "all"
+      ? [
+          subscribeCollectionByProgrammes<Record<string, any>>(
+            "offtakes",
+            programmeValues,
+            handleMergedData,
+            handleError,
+            { noDateFilter: true },
+          ),
+        ]
+      : [
+          subscribeCollectionByProgrammes<Record<string, any>>(
+            "offtakes",
+            programmeValues,
+            handleMergedData,
+            handleError,
+            {
+              dateField: "createdAt",
+              dateValueType: "timestamp-ms" as const,
+              startDate: queryStartDate,
+              endDate: queryEndDate,
+            },
+          ),
+        ];
+
+    return () => {
+      unsubscribers.forEach((unsubscribe) => {
+        if (typeof unsubscribe === 'function') unsubscribe();
+      });
+    };
+  }, [accessibleProgrammes, activeProgram, fetchMode, fetchRange.endDate, fetchRange.startDate, toast, userCanViewAllProgrammeData]);
 
   // Filtering System
   useEffect(() => {
@@ -915,7 +1026,7 @@ const LivestockOfftakePage = () => {
 
     const sortedFiltered = sortOfftakeByLatest(filtered);
     setFilteredOfftake(sortedFiltered);
-    
+
     const totalAnimals = sortedFiltered.reduce((sum, r) => sum + (r.noSheepGoats || 0), 0);
     const totalRevenue = sortedFiltered.reduce((sum, r) => sum + (r.totalprice || 0), 0);
     const uniqueRegions = new Set(sortedFiltered.map(f => f.region).filter(Boolean));
@@ -928,7 +1039,7 @@ const LivestockOfftakePage = () => {
 
     const totalLiveWeight = sortedFiltered.reduce((sum, r) => sum + calculateTotal(r.liveWeight), 0);
     const totalCarcassWeight = sortedFiltered.reduce((sum, r) => sum + calculateTotal(r.carcassWeight), 0);
-    
+
     setStats({
       totalRegions: uniqueRegions.size,
       totalAnimals,
@@ -951,17 +1062,43 @@ const LivestockOfftakePage = () => {
   const handleProgramChange = (program: string) => {
     setActiveProgram(program);
     processedKeysRef.current.clear();
-    setFilters({ search: "", startDate: "", endDate: "", region: "all", gender: "all" });
-    setFetchRange(currentMonth);
+    const fresh = getDefaultOfftakeFetchDates();
+    skipNextSearchDebounceRef.current = true;
+    setFilters(createDefaultFilters(fresh));
+    setFetchRange(fresh);
+    setFetchMode("dateRange");
+    setQuickRange("thisMonth");
     setLocalSearchInput("");
     setPagination(prev => ({ ...prev, page: 1 }));
     setSelectedRecords([]);
   };
 
+  // Applies a concrete start/end date pair: updates the visible filter values and widens
+  // the live fetch window to guarantee the requested range is actually loaded.
+  const applyDateRange = useCallback((startDate: string, endDate: string) => {
+    setFilters(prev => ({ ...prev, startDate, endDate }));
+    setFetchMode("dateRange");
+    setFetchRange(prev => unionDateRange(prev, startDate, endDate));
+    setPagination(prev => ({ ...prev, page: 1 }));
+  }, []);
+
+  const handleQuickRangeChange = useCallback((value: QuickRangeKey) => {
+    setQuickRange(value);
+    if (value === "custom") return;
+    const range = getQuickRangeDates(value);
+    if (range) applyDateRange(range.startDate, range.endDate);
+  }, [applyDateRange]);
+
   const handleFilterChange = useCallback((key: keyof Filters, value: string) => {
     setFilters(prev => ({ ...prev, [key]: value }));
     if (key === "startDate" || key === "endDate") {
-      setFetchRange((current) => ({ ...current, [key]: value }));
+      setQuickRange("custom");
+      setFetchMode("dateRange");
+      setFetchRange((current) => unionDateRange(
+        current,
+        key === "startDate" ? value : undefined,
+        key === "endDate" ? value : undefined
+      ));
     }
     setPagination(prev => ({ ...prev, page: 1 }));
   }, []);
@@ -1075,7 +1212,7 @@ const LivestockOfftakePage = () => {
 
       const headers = ['ID Number', 'Farmer Name', 'Gender', 'Programme', 'Region (County)', 'Subcounty', 'Location', 'Phone Number', 'Sessions', 'Total Animals', 'Total Live Weight (kg)', 'Total Carcass Weight (kg)', 'Total Revenue (KES)'];
       const csvRows = Array.from(groupedFarmers.values()).map(f => [f.idNumber, f.farmerName, f.gender, f.programme, f.region, f.subcounty, f.location, f.phoneNumber, f.sessions.toString(), f.totalAnimals.toString(), f.totalLiveWeight.toFixed(1), f.totalCarcassWeight.toFixed(2), f.totalRevenue.toFixed(2)]);
-      
+
       const csvContent = [headers, ...csvRows].map(row => row.map(f => `"${f}"`).join(',')).join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = window.URL.createObjectURL(blob);
@@ -1150,7 +1287,7 @@ const LivestockOfftakePage = () => {
     setUploadPreview(parsedSets.flat());
   };
 
-  const getUploadDateRange = (records: readonly any[]): Pick<Filters, "startDate" | "endDate"> | null => {
+  const getUploadDateRange = (records: readonly any[]): DateRangeBounds | null => {
     const timestamps = records
       .map((record) => parseDate(record?.date)?.getTime() || Number(record?.createdAt || 0))
       .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
@@ -1182,8 +1319,11 @@ const LivestockOfftakePage = () => {
         if (startIndex >= totalRecords) {
           const uploadedRange = getUploadDateRange(uploadedRecords.length > 0 ? uploadedRecords : uploadPreview);
           if (uploadedRange) {
+            // Widen the fetch window (not overwrite) so uploaded data outside the
+            // currently visible range is guaranteed to be included and visible.
+            setFetchRange((current) => unionDateRange(current, uploadedRange.startDate, uploadedRange.endDate));
             setFilters((current) => ({ ...current, startDate: uploadedRange.startDate, endDate: uploadedRange.endDate }));
-            setFetchRange(uploadedRange);
+            setQuickRange("custom");
             setPagination((current) => ({ ...current, page: 1 }));
           }
 
@@ -1217,21 +1357,21 @@ const LivestockOfftakePage = () => {
             }
 
             const recordData = {
-              county: record.county, 
-              createdAt: generatedCreatedAt, 
-              date: record.date, 
+              county: record.county,
+              createdAt: generatedCreatedAt,
+              date: record.date,
               gender: record.gender,
-              idNumber: record.idNumber, 
-              location: record.location, 
-              name: record.name, 
+              idNumber: record.idNumber,
+              location: record.location,
+              name: record.name,
               offtakeUserId: record.offtakeUserId,
-              phone: record.phone, 
+              phone: record.phone,
               programme: resolvedProg,
               Programme: resolvedProg,
-              subcounty: record.subcounty, 
+              subcounty: record.subcounty,
               username: record.username,
-              totalGoats, 
-              totalPrice, 
+              totalGoats,
+              totalPrice,
               goats: record.goats
             };
 
@@ -1367,7 +1507,7 @@ const LivestockOfftakePage = () => {
   const handleEditSubmit = async () => {
     if (!requireAdmin() || !viewingRecord) return;
     try {
-      // Direct formatted assignment string helps parsing correctly 
+      // Direct formatted assignment string helps parsing correctly
       const updatePayload = {
         date: editForm.date ? editForm.date : null,
         name: editForm.farmerName, gender: editForm.gender, idNumber: editForm.idNumber,
@@ -1398,18 +1538,25 @@ const LivestockOfftakePage = () => {
   };
 
   const clearAllFilters = useCallback(() => {
+    skipNextSearchDebounceRef.current = true;
     setFilters({ search: "", startDate: "", endDate: "", region: "all", gender: "all" });
-    setFetchRange(currentMonth);
+    setFetchRange(getQuickRangeDates("allTime") ?? getCurrentMonthDates());
+    setFetchMode("all");
+    setQuickRange("allTime");
     setLocalSearchInput("");
+    setFilterResetKey((current) => current + 1);
     setPagination(prev => ({ ...prev, page: 1 }));
     setSelectedRecords([]);
-  }, [currentMonth]);
+  }, []);
 
   const resetToCurrentMonth = useCallback(() => {
-    setFilters(prev => ({ ...prev, startDate: currentMonth.startDate, endDate: currentMonth.endDate }));
-    setFetchRange(currentMonth);
+    const fresh = getCurrentMonthDates();
+    setFilters(prev => ({ ...prev, startDate: fresh.startDate, endDate: fresh.endDate }));
+    setFetchRange(fresh);
+    setFetchMode("dateRange");
+    setQuickRange("thisMonth");
     setPagination(prev => ({ ...prev, page: 1 }));
-  }, [currentMonth]);
+  }, []);
 
   const uniqueRegions = useMemo(() => [...new Set(allOfftake.map(f => f.region).filter(Boolean))], [allOfftake]);
   const uniqueGenders = useMemo(() => [...new Set(allOfftake.map(f => f.gender).filter(Boolean))], [allOfftake]);
@@ -1425,7 +1572,7 @@ const LivestockOfftakePage = () => {
             {activeProgram === ALL_PROGRAMMES_VALUE ? "ALL PROGRAMMES" : `${activeProgram} PROGRAMME`}
           </Badge>
         </div>
-        
+
         <div className="flex flex-wrap gap-2 items-center w-full xl:w-auto">
           {accessibleProgrammes.length > 1 && (
             <div className="mr-4">
@@ -1482,7 +1629,17 @@ const LivestockOfftakePage = () => {
 
       <Card className="shadow-lg border-0 bg-white">
         <CardContent className="space-y-4 pt-6">
-          <FilterSection localSearchInput={localSearchInput} filters={filters} uniqueRegions={uniqueRegions} uniqueGenders={uniqueGenders} onSearchChange={handleLocalSearchChange} onFilterChange={handleFilterChange} />
+          <FilterSection
+            key={filterResetKey}
+            localSearchInput={localSearchInput}
+            filters={filters}
+            quickRange={quickRange}
+            uniqueRegions={uniqueRegions}
+            uniqueGenders={uniqueGenders}
+            onSearchChange={handleLocalSearchChange}
+            onFilterChange={handleFilterChange}
+            onQuickRangeChange={handleQuickRangeChange}
+          />
         </CardContent>
       </Card>
 
@@ -1510,7 +1667,6 @@ const LivestockOfftakePage = () => {
                       <th className="py-2 px-4 font-medium text-gray-600">ID No</th>
                       <th className="py-2 px-4 font-medium text-gray-600">County</th>
                       <th className="py-2 px-4 font-medium text-gray-600">Sub County</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Village</th>
                       <th className="py-2 px-4 font-medium text-gray-600">No.Animals</th>
                       <th className="py-2 px-4 font-medium text-gray-600">Total Price</th>
                       <th className="py-2 px-4 font-medium text-gray-600">Actions</th>
@@ -1530,7 +1686,6 @@ const LivestockOfftakePage = () => {
                         </td>
                         <td className="py-1 px-6 text-xs">{record.region || 'N/A'}</td>
                         <td className="py-1 px-6 text-xs">{record.subcounty || 'N/A'}</td>
-                        <td className="py-1 px-6 text-xs">{record.location || 'N/A'}</td>
                         <td className="py-1 px-6 text-xs font-bold">{record.noSheepGoats || 0}</td>
                         <td className="py-1 px-6 text-xs font-bold text-green-600">{formatCurrency(record.totalprice || 0)}</td>
                         <td className="py-1 px-6 text-xs">

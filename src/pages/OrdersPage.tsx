@@ -4,7 +4,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { db, fetchCollection, fetchCollectionByProgramme, onValue, ref, remove, update, set } from "@/lib/firebase";
 import { canViewAllProgrammes, isAdmin, isOfftakeOfficer, resolvePermissionPrincipal } from "@/contexts/authhelper";
 import { useToast } from "@/hooks/use-toast";
-import { matchesActiveProgramme, normalizeProgramme as normalizeProgrammeValue, resolveAccessibleProgrammes } from "@/lib/programme-access";
+import { ALL_PROGRAMMES_VALUE, matchesActiveProgramme, normalizeProgramme as normalizeProgrammeValue, resolveAccessibleProgrammes } from "@/lib/programme-access";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -279,6 +279,16 @@ const resolveOrderDate = (
   return record.date || record.createdAt || record.timestamp || fallback;
 };
 
+const getOrderSortTimestamp = (
+  batchDate: unknown,
+  completedAt: unknown,
+  createdAt: unknown,
+): number =>
+  parseDate(batchDate)?.getTime() ||
+  parseDate(completedAt)?.getTime() ||
+  parseDate(createdAt)?.getTime() ||
+  0;
+
 const resolveLatestPurchaseDate = (
   record: Pick<OrderRecord, "purchaseDate" | "date" | "completedAt" | "createdAt" | "timestamp" | "purchaseHistory" | "id" | "goatsBought" | "username"> | null | undefined,
   fallback: string | number = "",
@@ -290,8 +300,10 @@ const resolveLatestPurchaseDate = (
 
 const sortOrdersByLatest = (records: OrderRecord[]): OrderRecord[] =>
   [...records].sort((a, b) => {
-    const aDate = parseDate(a.completedAt || a.createdAt || a.timestamp)?.getTime() || 0;
-    const bDate = parseDate(b.completedAt || b.createdAt || b.timestamp)?.getTime() || 0;
+    const aOrderDate = resolveOrderDate(a);
+    const bOrderDate = resolveOrderDate(b);
+    const aDate = getOrderSortTimestamp(aOrderDate, a.completedAt, a.createdAt || a.timestamp);
+    const bDate = getOrderSortTimestamp(bOrderDate, b.completedAt, b.createdAt || b.timestamp);
     return bDate - aDate;
   });
 
@@ -353,7 +365,22 @@ const flattenOrdersStorage = (value: unknown, path: string[] = []): OrderRecord[
   );
 };
 
-const recordMatchesActiveProgramme = (record: OrderRecord, activeProgramme: string): boolean => {
+const recordMatchesActiveProgramme = (
+  record: OrderRecord,
+  activeProgramme: string,
+  accessibleProgrammes: readonly string[],
+): boolean => {
+  if (activeProgramme === ALL_PROGRAMMES_VALUE) {
+    const normalizedProgramme = normalizeProgrammeValue(record.programme);
+    if (!normalizedProgramme) return true;
+    if (accessibleProgrammes.includes(normalizedProgramme)) return true;
+
+    return getOrderEntries(record).some((item) => {
+      const itemProgramme = normalizeProgrammeValue((item as OrderItem & { programme?: string }).programme);
+      return !itemProgramme || accessibleProgrammes.includes(itemProgramme);
+    });
+  }
+
   if (matchesActiveProgramme(record.programme, activeProgramme)) return true;
   const normalizedProgramme = normalizeProgrammeValue(record.programme);
   if (!normalizedProgramme) return true;
@@ -1473,8 +1500,12 @@ const OrdersPage = () => {
     () => resolveAccessibleProgrammes(userCanViewAllProgrammeData, allowedProgrammes),
     [allowedProgrammes, userCanViewAllProgrammeData]
   );
-  const [activeProgram, setActiveProgram] = useSharedProgrammeSelection(accessibleProgrammes);
+  const [activeProgram, setActiveProgram] = useSharedProgrammeSelection(accessibleProgrammes, {
+    allowAll: true,
+    fallbackToAll: true,
+  });
   const availablePrograms = accessibleProgrammes;
+  const isViewingAllProgrammes = activeProgram === ALL_PROGRAMMES_VALUE;
   const userIsAdmin = useMemo(() => isAdmin(userRole), [userRole]);
   const userCanCreateOrders = useMemo(
     () => isAdmin(userRole) || isOfftakeOfficer(userRole) || isOfftakeOfficer(userAttribute),
@@ -1528,7 +1559,7 @@ const OrdersPage = () => {
       (snapshot) => {
         const records = sortOrdersByLatest(
           flattenOrdersStorage(snapshot.val()).filter((record) =>
-            recordMatchesActiveProgramme(record, activeProgram)
+            recordMatchesActiveProgramme(record, activeProgram, accessibleProgrammes)
           ),
         );
 
@@ -1572,7 +1603,7 @@ const OrdersPage = () => {
     // NOTE: `toast` intentionally excluded — see toastRef above. Including
     // it here previously caused the subscription to reset on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProgram]);
+  }, [accessibleProgrammes, activeProgram]);
 
   /* ---------------------------------------------------------------- */
   /* Reset dialogs on programme change                                 */
@@ -1684,7 +1715,7 @@ const OrdersPage = () => {
     for (const pc of precomputed) {
       if (!pc.isBatch) continue;
       const recProgramme = normalizeProgrammeValue(pc.record.programme);
-      if (recProgramme && recProgramme !== normalizeProgrammeValue(activeProgram)) continue;
+      if (!isViewingAllProgrammes && recProgramme && recProgramme !== normalizeProgrammeValue(activeProgram)) continue;
       const itemIds = new Set(pc.normalizedItems.map((i) => i.id));
       batchMap.set(pc.id, { pr: pc, items: [...pc.normalizedItems], itemIds });
       for (const id of pc.identifiers) {
@@ -1794,7 +1825,7 @@ const OrdersPage = () => {
         goatsBought, remainingGoats, status,
         county, subcounty, location, programme, username,
         orderDateTimestamp: parseDate(batchDate)?.getTime() || 0,
-        sortTimestamp: parseDate(createdAt)?.getTime() || parseDate(completedAt)?.getTime() || parseDate(batchDate)?.getTime() || 0,
+        sortTimestamp: getOrderSortTimestamp(batchDate, completedAt, createdAt),
         isReadyForCompletion, items, purchaseEntries,
         searchableText: `${county} ${subcounty} ${location} ${username} ${status} ${programme} ${rec.id} ${orderCode} ${totalGoats}`.toLowerCase(),
       });
@@ -1807,7 +1838,7 @@ const OrdersPage = () => {
     for (const pc of precomputed) {
       if (pc.isBatch || consumedRecordIds.has(pc.id) || batchMap.has(pc.id)) continue;
       const recProgramme = normalizeProgrammeValue(pc.record.programme);
-      if (recProgramme && recProgramme !== normalizeProgrammeValue(activeProgram)) continue;
+      if (!isViewingAllProgrammes && recProgramme && recProgramme !== normalizeProgrammeValue(activeProgram)) continue;
 
       const items = getSubmissionItems(pc.record);
       const purchaseEntries = getPurchaseHistoryEntries(pc.record);
@@ -1853,7 +1884,7 @@ const OrdersPage = () => {
         programme,
         username,
         orderDateTimestamp: parseDate(batchDate)?.getTime() || 0,
-        sortTimestamp: parseDate(createdAt)?.getTime() || parseDate(completedAt)?.getTime() || parseDate(batchDate)?.getTime() || 0,
+        sortTimestamp: getOrderSortTimestamp(batchDate, completedAt, createdAt),
         isReadyForCompletion: totalGoats > 0 && remainingGoats <= 0 && status !== "completed",
         items,
         purchaseEntries,
@@ -1863,7 +1894,7 @@ const OrdersPage = () => {
 
     result.sort((a, b) => b.sortTimestamp - a.sortTimestamp);
     return result;
-  }, [precomputed, activeProgram, mobileOfficerTokenSet]);
+  }, [precomputed, activeProgram, isViewingAllProgrammes, mobileOfficerTokenSet]);
 
   /* ---------------------------------------------------------------- */
   /* Dialog memoized data                                             */
@@ -2195,9 +2226,12 @@ const OrdersPage = () => {
       searchDebounceRef.current = null;
     }
     setFilters({ search: "", startDate: "", endDate: "", status: "all" });
+    if (availablePrograms.length > 1 && activeProgram !== ALL_PROGRAMMES_VALUE) {
+      setActiveProgram(ALL_PROGRAMMES_VALUE);
+    }
     setPagination({ page: 1, limit: PAGE_LIMIT, totalPages: 1, hasNext: false, hasPrev: false });
     setDebouncedSearch("");
-  }, []);
+  }, [activeProgram, availablePrograms.length, setActiveProgram]);
 
 
   /* ---------------------------------------------------------------- */
@@ -2349,9 +2383,9 @@ const OrdersPage = () => {
       toastRef.current({ title: "Select programme", description: "Please select a programme before creating an order.", variant: "destructive" });
       return;
     }
-    resetNewOrderForm(activeProgram);
+    resetNewOrderForm(isViewingAllProgrammes ? availablePrograms[0] || "" : activeProgram);
     setIsCreateDialogOpen(true);
-  }, [activeProgram, ensureOrderCreateAccess, resetNewOrderForm]);
+  }, [activeProgram, availablePrograms, ensureOrderCreateAccess, isViewingAllProgrammes, resetNewOrderForm]);
 
   const closeCreateDialog = useCallback(() => {
     if (creatingOrder) return;
@@ -2813,7 +2847,9 @@ const OrdersPage = () => {
         createdOrders.push(orderRecord);
       }
 
-      const visibleCreatedOrders = createdOrders.filter((record) => matchesActiveProgramme(record.programme, activeProgram));
+      const visibleCreatedOrders = createdOrders.filter((record) =>
+        recordMatchesActiveProgramme(record, activeProgram, accessibleProgrammes)
+      );
       if (visibleCreatedOrders.length > 0) {
         // Merge into local state immediately for instant feedback, and also
         // seed the fingerprint cache used by the realtime listener so that
@@ -2863,7 +2899,7 @@ const OrdersPage = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex items-center gap-3">
           <div className="rounded-xl bg-blue-600 p-2.5 text-white shadow-md shadow-blue-200">
             <ShoppingCart className="h-5 w-5" />
@@ -2873,16 +2909,36 @@ const OrdersPage = () => {
             <p className="text-sm text-slate-600">Grouped order batches with totals and per-order breakdown.</p>
           </div>
         </div>
-        {userCanCreateOrders && (
-          <Button
-            onClick={openCreateDialog}
-            disabled={!activeProgram}
-            className="w-fit gap-2 bg-blue-600 text-white shadow-md shadow-blue-200 hover:bg-blue-700"
-          >
-            <Plus className="h-4 w-4" />
-            New Order
+        <div className="flex flex-wrap items-end gap-2">
+          {availablePrograms.length > 1 && (
+            <div className="w-[170px] shrink-0 space-y-1.5">
+              <Select value={activeProgram} onValueChange={setActiveProgram} disabled={availablePrograms.length === 0}>
+                <SelectTrigger className="border-slate-200 bg-white focus:border-blue-400 focus:ring-blue-100">
+                  <SelectValue placeholder="Select" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_PROGRAMMES_VALUE}>All Programmes</SelectItem>
+                  {availablePrograms.map((p) => (
+                    <SelectItem key={p} value={p}>{p}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <Button type="button" variant="outline" onClick={clearFilters} className="border-slate-200 hover:bg-slate-50">
+            Reset Filters
           </Button>
-        )}
+          {userCanCreateOrders && (
+            <Button
+              onClick={openCreateDialog}
+              disabled={!activeProgram}
+              className="gap-2 bg-blue-600 text-white shadow-md shadow-blue-200 hover:bg-blue-700"
+            >
+              <Plus className="h-4 w-4" />
+              New Order
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* Stat Cards */}
@@ -3010,24 +3066,6 @@ const OrdersPage = () => {
                 </SelectContent>
               </Select>
             </div>
-            {userCanViewAllProgrammeData && (
-              <div className="w-[138px] shrink-0 space-y-1.5 sm:w-auto">
-                <Label className="text-xs font-medium text-slate-600">Programme</Label>
-                <Select value={activeProgram} onValueChange={setActiveProgram} disabled={availablePrograms.length === 0}>
-                  <SelectTrigger className="border-slate-200 bg-white focus:border-blue-400 focus:ring-blue-100 w-[130px]">
-                    <SelectValue placeholder="Select" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availablePrograms.map((p) => (
-                      <SelectItem key={p} value={p}>{p}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-            <Button variant="outline" onClick={clearFilters} className="mt-6 border-slate-200 hover:bg-slate-50 shrink-0 sm:mt-0">
-              Clear
-            </Button>
           </ScrollableFilterBar>
         </CardContent>
       </Card>
@@ -3056,7 +3094,7 @@ const OrdersPage = () => {
                     <tr className="bg-blue-500 text-White text-xs">
                       <th className="py-3 px-3 font-semibold text-white ">Order Date</th>
                       <th className="py-3 px-3 font-semibold text-white ">County</th>
-                      <th className="py-3 px-3 font-semibold text-white ">Ordered By</th>
+                     
                       <th className="py-3 px-3 font-semibold text-white ">Target Goats</th>
                       <th className="py-3 px-3 font-semibold text-white ">Recorded Goats</th>
                       <th className="py-3 px-3 font-semibold text-white ">Purchased</th>

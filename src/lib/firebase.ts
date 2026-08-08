@@ -247,17 +247,6 @@ const withDefaultCurrentMonthFilter = (
   path: string,
   options: CollectionFetchOptions,
 ): CollectionFetchOptions => {
-  if (path === "offtakes" && options.noDateFilter && !options.startDate && !options.endDate) {
-    const currentMonth = getCurrentMonthRange();
-    return {
-      ...options,
-      noDateFilter: false,
-      ...DEFAULT_DATE_FIELD_BY_PATH.offtakes,
-      startDate: currentMonth.startDate,
-      endDate: currentMonth.endDate,
-    };
-  }
-
   if (options.noDateFilter || options.dateField || options.startDate || options.endDate) {
     return options;
   }

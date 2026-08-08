@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef, type KeyboardEvent } from "react";
 import { fetchCollectionByProgrammes, type DatabaseRecord } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 import { useQuery } from "@tanstack/react-query";
@@ -217,6 +217,26 @@ const getCurrentWeekDates = () => {
     startDate: formatDateToLocal(startOfWeek),
     endDate: formatDateToLocal(now),
   };
+};
+
+const getQuarterKeyForDate = (date: Date): ProgressPeriodKey =>
+  `q${Math.floor(date.getMonth() / 3) + 1}` as ProgressPeriodKey;
+
+const getQuarterKeysForDateRange = (range: { startDate?: string; endDate?: string }): ProgressPeriodKey[] => {
+  if (!range.startDate && !range.endDate) return [];
+  const { start, end } = normalizeDateRange(range);
+  const keys: ProgressPeriodKey[] = [];
+  const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+
+  while (cursor <= end) {
+    const key = getQuarterKeyForDate(cursor);
+    if (!keys.includes(key)) keys.push(key);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+
+  const endKey = getQuarterKeyForDate(end);
+  if (!keys.includes(endKey)) keys.push(endKey);
+  return keys;
 };
 
 const normalizeDateRange = (range: { startDate?: string; endDate?: string }) => {
@@ -575,7 +595,9 @@ const LivestockFarmersAnalytics = () => {
   const [stats, setStats] = useState(EMPTY_STATS);
 
   const [dateRange, setDateRange] = useState<{ startDate: string; endDate: string }>(() => getCurrentMonthDates());
+  const [draftDateRange, setDraftDateRange] = useState<{ startDate: string; endDate: string }>(() => getCurrentMonthDates());
   const [selectedYear, setSelectedYear] = useState(() => String(getToday().getFullYear()));
+  const [pendingDateKey, setPendingDateKey] = useState<"startDate" | "endDate" | null>(null);
   const hasActiveDateFilters = Boolean(dateRange.startDate || dateRange.endDate);
   const targetMode = useMemo(
     () => resolveTargetMode(dateRange, filterMode),
@@ -774,7 +796,18 @@ const LivestockFarmersAnalytics = () => {
       return;
     }
 
-    fetchCollectionByProgrammes<Record<string, any>>("farmers", programmesToRead)
+    fetchCollectionByProgrammes<Record<string, any>>(
+      "farmers",
+      programmesToRead,
+      hasActiveDateFilters
+        ? {
+            dateField: "createdAt",
+            dateValueType: "timestamp-ms",
+            startDate: dateRange.startDate,
+            endDate: dateRange.endDate,
+          }
+        : { noDateFilter: true },
+    )
       .then((records) => {
         if (cancelled) return;
         setAllFarmers(mapFarmers(records));
@@ -787,7 +820,7 @@ const LivestockFarmersAnalytics = () => {
       });
 
     return () => { cancelled = true; };
-  }, [activeProgram, accessibleProgrammes]);
+  }, [activeProgram, accessibleProgrammes, dateRange.endDate, dateRange.startDate, hasActiveDateFilters]);
 
   // --- 3. Data Fetching (Capacity Building) ---
   useEffect(() => {
@@ -827,7 +860,18 @@ const LivestockFarmersAnalytics = () => {
       return;
     }
 
-    fetchCollectionByProgrammes<Record<string, any>>("capacityBuilding", programmesToRead)
+    fetchCollectionByProgrammes<Record<string, any>>(
+      "capacityBuilding",
+      programmesToRead,
+      hasActiveDateFilters
+        ? {
+            dateField: "startDate",
+            dateValueType: "date-string",
+            startDate: dateRange.startDate,
+            endDate: dateRange.endDate,
+          }
+        : { noDateFilter: true },
+    )
       .then((records) => {
         if (cancelled) return;
         setTrainingRecords(mapTraining(records));
@@ -838,7 +882,7 @@ const LivestockFarmersAnalytics = () => {
       });
 
     return () => { cancelled = true; };
-  }, [activeProgram, accessibleProgrammes]);
+  }, [activeProgram, accessibleProgrammes, dateRange.endDate, dateRange.startDate, hasActiveDateFilters]);
 
   // --- 4. Filtering & Analytics Logic ---
   useEffect(() => {
@@ -1116,52 +1160,86 @@ const LivestockFarmersAnalytics = () => {
     },
     [analyticsQuery.data, effectiveTarget, localUserProgressData, quarterTargets, quarterYear],
   );
+  const averageRegisteredFarmers = useMemo(() => {
+    const activeOfficerCount = userProgressData.filter((user) => user.farmersRegistered > 0).length;
+    return activeOfficerCount > 0 ? stats.total / activeOfficerCount : 0;
+  }, [stats.total, userProgressData]);
+  const visibleOfficerPeriods = useMemo(() => {
+    if (!selectedOfficer) return [];
+    if (!hasActiveDateFilters) return selectedOfficer.periods;
 
-  const handleDateRangeChange = (key: string, value: string) => {
-    setDateRange(prev => {
-      const nextRange = { ...prev, [key]: value };
-      setSelectedYear(getSelectedYearFromDateRange(nextRange));
-      return nextRange;
-    });
-    // Detect the appropriate filter mode based on the selected date range
-    const updatedRange = key === "startDate" ? { ...dateRange, startDate: value } : { ...dateRange, endDate: value };
-    if (updatedRange.startDate && updatedRange.endDate) {
-      const start = parseDate(updatedRange.startDate);
-      const end = parseDate(updatedRange.endDate);
+    const visibleQuarterKeys = getQuarterKeysForDateRange(dateRange);
+    return selectedOfficer.periods.filter((period) => visibleQuarterKeys.includes(period.key));
+  }, [dateRange, hasActiveDateFilters, selectedOfficer]);
+
+  const commitDateRange = useCallback((nextRange: { startDate: string; endDate: string }) => {
+    setDateRange(nextRange);
+    setSelectedYear(getSelectedYearFromDateRange(nextRange));
+
+    if (nextRange.startDate && nextRange.endDate) {
+      const start = parseDate(nextRange.startDate);
+      const end = parseDate(nextRange.endDate);
       if (start && end) {
-        // Same month = monthly mode
         if (start.getFullYear() === end.getFullYear() && start.getMonth() === end.getMonth()) {
           setFilterMode("monthly");
           return;
         }
-        // Check if the range spans multiple months - use custom mode for duration-based calculation
         const monthDiff = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
         if (monthDiff >= 1) {
-          setFilterMode("custom"); // Will use duration-based calculation
+          setFilterMode("custom");
           return;
         }
       }
     }
     setFilterMode("custom");
-  };
+  }, []);
+
+  const handleDateRangeChange = useCallback((key: "startDate" | "endDate", value: string) => {
+    setDraftDateRange((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
+  const handleDateInputFocus = useCallback((key: "startDate" | "endDate") => {
+    setPendingDateKey(key);
+  }, []);
+
+  const handleDateInputBlur = useCallback(() => {
+    setPendingDateKey(null);
+    commitDateRange(draftDateRange);
+  }, [commitDateRange, draftDateRange]);
+
+  const handleDateInputKeyDown = useCallback((event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    setPendingDateKey(null);
+    commitDateRange(draftDateRange);
+    event.currentTarget.blur();
+  }, [commitDateRange, draftDateRange]);
 
   // Filter Buttons
   const setWeekFilter = () => {
-    setDateRange(getCurrentWeekDates());
+    const nextRange = getCurrentWeekDates();
+    setDateRange(nextRange);
+    setDraftDateRange(nextRange);
     setSelectedYear(String(getToday().getFullYear()));
     setFilterMode("weekly");
+    setPendingDateKey(null);
   };
 
   const setMonthFilter = () => {
-    setDateRange(getCurrentMonthDates());
+    const nextRange = getCurrentMonthDates();
+    setDateRange(nextRange);
+    setDraftDateRange(nextRange);
     setSelectedYear(String(getToday().getFullYear()));
     setFilterMode("monthly");
+    setPendingDateKey(null);
   };
 
   const setYearFilter = () => {
-    setDateRange(getCurrentYearDates());
+    const nextRange = getCurrentYearDates();
+    setDateRange(nextRange);
+    setDraftDateRange(nextRange);
     setSelectedYear(String(getToday().getFullYear()));
     setFilterMode("yearly");
+    setPendingDateKey(null);
   };
 
   const handleYearChange = (yearValue: string) => {
@@ -1169,17 +1247,23 @@ const LivestockFarmersAnalytics = () => {
     if (!Number.isFinite(year)) return;
 
     setSelectedYear(yearValue);
-    setDateRange({
+    const nextRange = {
       startDate: `${year}-01-01`,
       endDate: `${year}-12-31`,
-    });
+    };
+    setDateRange(nextRange);
+    setDraftDateRange(nextRange);
     setFilterMode("yearly");
+    setPendingDateKey(null);
   };
 
   const clearFilters = () => {
-    setDateRange({ startDate: "", endDate: "" });
+    const nextRange = { startDate: "", endDate: "" };
+    setDateRange(nextRange);
+    setDraftDateRange(nextRange);
     setSelectedYear("");
     setFilterMode("yearly"); // Reset to yearly as default after clearing
+    setPendingDateKey(null);
     setSelectedOfficer(null);
     setIsOfficerTargetsOpen(false);
   };
@@ -1322,15 +1406,23 @@ const LivestockFarmersAnalytics = () => {
                   <div className="flex min-w-max flex-nowrap items-center gap-2 p-1">
                     <Input
                       type="date"
-                      value={dateRange.startDate}
+                      value={draftDateRange.startDate}
                       onChange={(e) => handleDateRangeChange("startDate", e.target.value)}
+                      onFocus={() => handleDateInputFocus("startDate")}
+                      onBlur={handleDateInputBlur}
+                      onKeyDown={handleDateInputKeyDown}
+                      data-pending={pendingDateKey === "startDate" ? "true" : undefined}
                       className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
                     />
 
                     <Input
                       type="date"
-                      value={dateRange.endDate}
+                      value={draftDateRange.endDate}
                       onChange={(e) => handleDateRangeChange("endDate", e.target.value)}
+                      onFocus={() => handleDateInputFocus("endDate")}
+                      onBlur={handleDateInputBlur}
+                      onKeyDown={handleDateInputKeyDown}
+                      data-pending={pendingDateKey === "endDate" ? "true" : undefined}
                       className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
                     />
 
@@ -1426,9 +1518,9 @@ const LivestockFarmersAnalytics = () => {
         />
         <StatsCard 
           title="Average of Registered Farmers" 
-          value={stats.total > 0 ? (stats.total / (stats.totalAnimals || 1)).toFixed(1) : "0"} 
+          value={averageRegisteredFarmers.toFixed(1)} 
           icon={GraduationCap}
-          description={`Per animal census across ${stats.total.toLocaleString()} farmers`}
+          description={`Per active field officer across ${stats.total.toLocaleString()} farmers`}
           color="yellow"
         />
         <StatsCard 
@@ -1569,7 +1661,7 @@ const LivestockFarmersAnalytics = () => {
                     </tr>
                   </thead>
                   <tbody>
-                    {selectedOfficer.periods.map((period) => {
+                    {visibleOfficerPeriods.map((period) => {
                       const progressPercent = Math.min(period.progressPercentage, 100);
                       const fallbackQuarter = quarterTargets.find((entry) => entry.key === period.key);
                       const isUpcoming = period.upcoming ?? (fallbackQuarter ? isUpcomingQuarter(fallbackQuarter.start, quarterYear) : false);

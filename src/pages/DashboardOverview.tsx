@@ -32,7 +32,12 @@ import ProgrammeSelector from "@/components/programme-selector";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/contexts/AuthContext";
-import { canViewAllProgrammes } from "@/contexts/authhelper";
+import {
+  canViewAllProgrammes,
+  isAdmin,
+  isMonitoringAndEvaluationOfficer,
+  resolvePermissionPrincipal,
+} from "@/contexts/authhelper";
 import { useSharedProgrammeSelection } from "@/hooks/use-shared-programme-selection";
 import { fetchAnalysisSummary } from "@/lib/analysis";
 import { subscribeCollectionByProgrammes } from "@/lib/firebase";
@@ -1811,7 +1816,13 @@ const RecentLocationsPanel = ({ locations }: { locations: RecentLocation[] }) =>
   </div>
 );
 
-const RecentActivitiesPanel = ({ activities }: { activities: RecentActivity[] }) => (
+const RecentActivitiesPanel = ({
+  activities,
+  canAddDashboardContent,
+}: {
+  activities: RecentActivity[];
+  canAddDashboardContent: boolean;
+}) => (
   <div className="overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-[0_18px_50px_rgba(15,23,42,0.08)]">
     <div className="flex items-center justify-between gap-4 border-b border-slate-100 bg-gradient-to-r from-slate-50 via-white to-slate-50 px-6 py-6 sm:px-8">
       <div className="flex items-center gap-4">
@@ -1898,15 +1909,17 @@ const RecentActivitiesPanel = ({ activities }: { activities: RecentActivity[] })
           </Link>
         </Button>
 
-        <Button
-          asChild
-          className="h-12 rounded-2xl bg-gradient-to-r from-[#4f7cff] to-[#9333ea] px-6 text-base font-semibold text-white shadow-[0_16px_32px_rgba(99,102,241,0.28)] hover:from-[#4370ec] hover:to-[#8429d6]"
-        >
-          <Link to="/dashboard/activities">
-            <Plus className="h-4 w-4" />
-            Schedule Activity
-          </Link>
-        </Button>
+        {canAddDashboardContent && (
+          <Button
+            asChild
+            className="h-12 rounded-2xl bg-gradient-to-r from-[#4f7cff] to-[#9333ea] px-6 text-base font-semibold text-white shadow-[0_16px_32px_rgba(99,102,241,0.28)] hover:from-[#4370ec] hover:to-[#8429d6]"
+          >
+            <Link to="/dashboard/activities">
+              <Plus className="h-4 w-4" />
+              Schedule Activity
+            </Link>
+          </Button>
+        )}
       </div>
     </div>
   </div>
@@ -2254,6 +2267,14 @@ const RecentOfftakesTable = ({ offtakes }: { offtakes: OverviewRecord[] }) => {
 
 const DashboardOverview = () => {
   const { user, userRole, userAttribute, userName, allowedProgrammes, loading } = useAuth();
+  const permissionPrincipal = useMemo(
+    () => resolvePermissionPrincipal(userRole, userAttribute),
+    [userAttribute, userRole],
+  );
+  const canAddDashboardContent = useMemo(
+    () => isAdmin(permissionPrincipal) || isMonitoringAndEvaluationOfficer(permissionPrincipal),
+    [permissionPrincipal],
+  );
   const userCanViewAllProgrammeData = useMemo(
     () => canViewAllProgrammes(userRole, userAttribute, allowedProgrammes),
     [allowedProgrammes, userAttribute, userRole],
@@ -2753,7 +2774,10 @@ const DashboardOverview = () => {
               <RecentFarmersPanel
                 farmers={overviewData.recentFarmers ?? EMPTY_OVERVIEW_DATA.recentFarmers}
               />
-              <RecentActivitiesPanel activities={overviewData.recentActivities ?? EMPTY_OVERVIEW_DATA.recentActivities} />
+              <RecentActivitiesPanel
+                activities={overviewData.recentActivities ?? EMPTY_OVERVIEW_DATA.recentActivities}
+                canAddDashboardContent={canAddDashboardContent}
+              />
             </div>
 
             {/* Row 5: Goats Purchased by County + Recent Offtakes */}
@@ -2763,7 +2787,7 @@ const DashboardOverview = () => {
             </div>
 
             <DashboardInsights
-              allowAdd
+              allowAdd={canAddDashboardContent}
               accessibleProgrammes={accessibleProgrammes}
               selectedProgramme={selectedProgramme}
               description="Add and review dated insights for livestock farmers, capacity building, livestock, hay storage, offtake, and animal health."

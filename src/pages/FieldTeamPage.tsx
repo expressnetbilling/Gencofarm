@@ -57,6 +57,7 @@ type SavedFieldOfficerRow = {
   fieldOfficerName: string;
   totalLivestockFarmersRegistered: number;
   latestFarmerRegistered: string;
+  latestFarmerLocation?: string;
   // Exact timestamp (ms) the most-recently-registered farmer was captured.
   latestFarmerRegisteredAt?: number;
   numberOfTraining: number;
@@ -99,6 +100,7 @@ type FieldTeamReport = {
 type SourceFarmer = {
   id: string;
   name: string;
+  location: string;
   officer: string;
   programme: string;
   timestamp: number;
@@ -254,6 +256,13 @@ const normalizeName = (...values: unknown[]): string => {
   return "";
 };
 
+const joinLocation = (...values: unknown[]): string =>
+  values
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim())
+    .filter((value, index, allValues) => allValues.findIndex((item) => item.toLowerCase() === value.toLowerCase()) === index)
+    .join(", ");
+
 const getProgrammeValue = (...values: unknown[]): string => {
   for (const value of values) {
     const normalized = normalizeProgramme(value);
@@ -394,6 +403,29 @@ const computeTotals = (records: SavedFieldOfficerRow[]) =>
     },
   );
 
+// FIX: Firebase Realtime Database's set()/update() calls throw
+// "value argument contains undefined" if ANY nested property is
+// undefined (e.g. latestFarmerRegisteredAt is left undefined for an
+// officer who only logged trainings, never registered a farmer). That
+// exception was the actual cause of the recurring
+// "field team report could not be saved" toast — it has nothing to do
+// with permissions or network connectivity. Recursively strip out any
+// key whose value is undefined before every push/set/update call.
+const sanitizeForFirebase = <T,>(value: T): T => {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeForFirebase(item)) as unknown as T;
+  }
+  if (value && typeof value === "object" && !(value instanceof Date)) {
+    const result: Record<string, unknown> = {};
+    Object.entries(value as Record<string, unknown>).forEach(([key, entryValue]) => {
+      if (entryValue === undefined) return; // drop the key entirely instead of writing "undefined"
+      result[key] = sanitizeForFirebase(entryValue);
+    });
+    return result as T;
+  }
+  return value;
+};
+
 const getUserDirectoryAttribute = (record: UserDirectoryRecord): string => {
   const directAttribute = record.accessControl?.customAttribute;
   if (typeof directAttribute === "string" && directAttribute.trim()) return directAttribute.trim();
@@ -422,6 +454,7 @@ const isHrDirectoryRecord = (record: UserDirectoryRecord): boolean => {
 const normalizeFarmerRecord = (record: Record<string, unknown> & { id: string }): SourceFarmer => ({
   id: record.id,
   name: normalizeName(record.name, record.farmerName, record.fullName) || "Unnamed farmer",
+  location: joinLocation(record.county, record.subcounty, record.subCounty, record.location),
   officer:
     normalizeName(record.username, record.created_by, record.createdBy, record.fieldOfficer, record.officer) ||
     UNKNOWN_OFFICER,
@@ -544,6 +577,7 @@ const buildWeeklyRows = (
         fieldOfficerName: key,
         totalLivestockFarmersRegistered: 0,
         latestFarmerRegistered: "",
+        latestFarmerLocation: "",
         latestFarmerRegisteredAt: undefined,
         latestFarmerTimestamp: 0,
         numberOfTraining: 0,
@@ -567,6 +601,7 @@ const buildWeeklyRows = (
       if (farmer.timestamp >= row.latestFarmerTimestamp) {
         row.latestFarmerTimestamp = farmer.timestamp;
         row.latestFarmerRegistered = farmer.name;
+        row.latestFarmerLocation = farmer.location;
         row.latestFarmerRegisteredAt = farmer.timestamp;
       }
     });
@@ -614,6 +649,7 @@ const normalizeSavedReport = (record: FieldTeamReport & { id: string }): FieldTe
         fieldOfficerName: row.fieldOfficerName || UNKNOWN_OFFICER,
         totalLivestockFarmersRegistered: getNumber(row.totalLivestockFarmersRegistered),
         latestFarmerRegistered: row.latestFarmerRegistered || "",
+        latestFarmerLocation: row.latestFarmerLocation || "",
         latestFarmerRegisteredAt:
           typeof row.latestFarmerRegisteredAt === "number" ? row.latestFarmerRegisteredAt : undefined,
         numberOfTraining: getNumber(row.numberOfTraining),
@@ -627,7 +663,10 @@ const normalizeSavedReport = (record: FieldTeamReport & { id: string }): FieldTe
     reportId: record.reportId || getReportId(record.programme || ""),
     reportTitle: record.reportTitle || "",
     programme: normalizeProgramme(record.programme) || record.programme || "",
-    reportDate: record.reportDate || "",
+    reportDate:
+      (record.submittedAt ? formatDateToLocal(new Date(record.submittedAt)) : "") ||
+      record.reportDate ||
+      "",
     fromDate: record.fromDate || record.weekStart || record.reportDate || "",
     toDate: record.toDate || record.weekEnd || record.reportDate || "",
     weekStart: record.weekStart || record.fromDate || "",
@@ -670,6 +709,12 @@ const FieldTeamPage = () => {
   const [editRows, setEditRows] = useState<SavedFieldOfficerRow[]>([]);
   const [updating, setUpdating] = useState(false);
 
+  // Filters for the "Submitted Field Team Reports" table below — filter by
+  // the date the report was submitted, independent from the from/to range
+  // used to compute a new report above.
+  const [reportsFilterFromDate, setReportsFilterFromDate] = useState("");
+  const [reportsFilterToDate, setReportsFilterToDate] = useState("");
+
   const permissionPrincipal = useMemo(
     () => resolvePermissionPrincipal(userRole, userAttribute),
     [userRole, userAttribute],
@@ -684,6 +729,12 @@ const FieldTeamPage = () => {
   const userCanViewReports = useMemo(
     () => userCanSubmitReport || userIsHr,
     [userCanSubmitReport, userIsHr],
+  );
+  // Status + submitted-by columns are relevant to whoever can manage
+  // (Admin) or review (HR) reports — not just Admin.
+  const userCanViewReportMeta = useMemo(
+    () => userCanManageReports || userIsHr,
+    [userCanManageReports, userIsHr],
   );
   const userCanViewAllProgrammeData = useMemo(
     () => canViewAllProgrammes(userRole, userAttribute, allowedProgrammes),
@@ -814,6 +865,25 @@ const FieldTeamPage = () => {
       }),
     [accessibleProgrammes, reports],
   );
+
+  // Applies the "From"/"To" date filter above the submitted-reports table,
+  // matching against each report's actual submission date.
+  const dateFilteredReports = useMemo(() => {
+    if (!reportsFilterFromDate && !reportsFilterToDate) return submittedReports;
+
+    const rangeStart = reportsFilterFromDate ? parseLocalDate(reportsFilterFromDate).getTime() : -Infinity;
+    let rangeEnd = Infinity;
+    if (reportsFilterToDate) {
+      const endOfDay = parseLocalDate(reportsFilterToDate);
+      endOfDay.setHours(23, 59, 59, 999);
+      rangeEnd = endOfDay.getTime();
+    }
+
+    return submittedReports.filter((report) => {
+      const reportTime = report.submittedAt || parseDate(report.reportDate)?.getTime() || 0;
+      return reportTime >= rangeStart && reportTime <= rangeEnd;
+    });
+  }, [submittedReports, reportsFilterFromDate, reportsFilterToDate]);
 
   const loadReports = async () => {
     const records = await fetchCollection<FieldTeamReport>(FIELD_TEAM_PATH, { noDateFilter: true, limit: 1000 });
@@ -974,17 +1044,23 @@ const FieldTeamPage = () => {
 
     const submittedAt = Date.now();
     const submittedDate = new Date(submittedAt);
+    const submittedDateValue = formatDateToLocal(submittedDate);
     const isLateSubmission = submittedAt > reportRange.deadlineAt;
 
     try {
       setSaving(true);
       const newReportRef = await push(ref(db, FIELD_TEAM_PATH));
 
-      await set(ref(db, `${FIELD_TEAM_PATH}/${newReportRef.key}`), {
+      // FIX: sanitize computedRows before writing — Firebase RTDB's set()
+      // rejects the entire write if any nested field (e.g.
+      // latestFarmerRegisteredAt for an officer with no farmer
+      // registrations yet) is undefined. This was the root cause of the
+      // recurring "field team report could not be saved" error.
+      const payload = sanitizeForFirebase({
         reportId,
         reportTitle: reportTitle.trim(),
         programme: selectedProgramme,
-        reportDate: reportRange.fromDate,
+        reportDate: submittedDateValue,
         fromDate: reportRange.fromDate,
         toDate: reportRange.toDate,
         weekStart: reportRange.fromDate,
@@ -1010,6 +1086,8 @@ const FieldTeamPage = () => {
         totals: computedTotals,
       });
 
+      await set(ref(db, `${FIELD_TEAM_PATH}/${newReportRef.key}`), payload);
+
       await notifyHrFieldTeamReportSubmitted({
         savedReportKey: newReportRef.key,
         submittedAt,
@@ -1030,7 +1108,10 @@ const FieldTeamPage = () => {
       console.error("Failed to submit field team report:", error);
       toast({
         title: "Submission failed",
-        description: "The field team report could not be saved. Please try again.",
+        description:
+          error instanceof Error
+            ? `The field team report could not be saved: ${error.message}`
+            : "The field team report could not be saved. Please try again.",
         variant: "destructive",
       });
     } finally {
@@ -1039,7 +1120,7 @@ const FieldTeamPage = () => {
   };
 
   // Opens a report for viewing. If an HR user opens a report that is still
-  // "pending", it is automatically marked as "reviewed" (admin-only visibility).
+  // "pending", it is automatically marked as "reviewed" (Admin/HR visibility).
   const handleViewReport = async (report: FieldTeamReport) => {
     setViewingReport(report);
 
@@ -1088,7 +1169,7 @@ const FieldTeamPage = () => {
         return {
           ...row,
           [key]:
-            key === "fieldOfficerName" || key === "latestFarmerRegistered"
+            key === "fieldOfficerName" || key === "latestFarmerRegistered" || key === "latestFarmerLocation"
               ? value
               : getNumber(value),
         };
@@ -1112,6 +1193,7 @@ const FieldTeamPage = () => {
         fieldOfficerName: row.fieldOfficerName.trim() || UNKNOWN_OFFICER,
         totalLivestockFarmersRegistered: getNumber(row.totalLivestockFarmersRegistered),
         latestFarmerRegistered: row.latestFarmerRegistered.trim(),
+        latestFarmerLocation: row.latestFarmerLocation?.trim() || "",
         latestFarmerRegisteredAt: row.latestFarmerRegisteredAt,
         numberOfTraining: getNumber(row.numberOfTraining),
         numberOfFarmersTrained: getNumber(row.numberOfFarmersTrained),
@@ -1121,13 +1203,18 @@ const FieldTeamPage = () => {
 
     try {
       setUpdating(true);
-      await update(ref(db, `${FIELD_TEAM_PATH}/${editingReport.id}`), {
-        records: cleanedRows,
-        totals: computeTotals(cleanedRows),
-        updatedAt: Date.now(),
-        updatedBy: userName || user?.displayName || user?.email || "Unknown user",
-        updatedByRole: permissionPrincipal || "unknown",
-      });
+      // FIX: same undefined-stripping treatment as handleSubmitReport —
+      // latestFarmerRegisteredAt can be undefined here too.
+      await update(
+        ref(db, `${FIELD_TEAM_PATH}/${editingReport.id}`),
+        sanitizeForFirebase({
+          records: cleanedRows,
+          totals: computeTotals(cleanedRows),
+          updatedAt: Date.now(),
+          updatedBy: userName || user?.displayName || user?.email || "Unknown user",
+          updatedByRole: permissionPrincipal || "unknown",
+        }),
+      );
 
       setEditingReport(null);
       setEditRows([]);
@@ -1137,7 +1224,10 @@ const FieldTeamPage = () => {
       console.error("Failed to update field team report:", error);
       toast({
         title: "Update failed",
-        description: "The saved report could not be updated.",
+        description:
+          error instanceof Error
+            ? `The saved report could not be updated: ${error.message}`
+            : "The saved report could not be updated.",
         variant: "destructive",
       });
     } finally {
@@ -1172,35 +1262,43 @@ const FieldTeamPage = () => {
     );
   }
 
+  // Table used both for the "Computed Field Officer Records" preview and
+  // inside the "View" dialog. Tightened vertical padding + widened
+  // horizontal padding per design feedback so rows read as compact but
+  // not cramped, with no cell text wrapping into a paragraph.
   const ReportRowsTable = ({ records }: { records: SavedFieldOfficerRow[] }) => (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto rounded-lg border border-slate-200">
       <table className="w-full text-sm">
         <thead>
-          <tr className="border-b border-slate-200 bg-white text-left text-xs uppercase text-slate-500">
-            <th className="px-4 py-2 text-[9px] font-medium ">Field officer</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">Farmers registered</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">Latest registered</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">Registered at</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">No of Training</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">Trained Farmers</th>
-            <th className="px-4 py-2 text-[9px] font-medium ">Validation Doc</th>
+          <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase text-slate-500">
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Field officer</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Farmers registered</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Latest registered</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Location</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Registered at</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">No of Training</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Trained Farmers</th>
+            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Validation Doc</th>
           </tr>
         </thead>
         <tbody>
           {records.map((record, index) => (
             <tr key={`${record.fieldOfficerName}-${index}`} className="border-b border-slate-100 last:border-b-0">
-              <td className="px-4 py-3 font-medium text-slate-800">{record.fieldOfficerName}</td>
-              <td className="px-4 py-3 text-slate-700">
+              <td className="whitespace-nowrap px-6 py-1.5 font-medium text-slate-800">{record.fieldOfficerName}</td>
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">
                 {record.totalLivestockFarmersRegistered.toLocaleString()}
               </td>
-              <td className="px-4 py-3 text-slate-700">{record.latestFarmerRegistered || "N/A"}</td>
-              <td className="px-4 py-3 text-slate-700 flex items-center gap-1">
-                <Clock className="h-3 w-3 text-slate-400" />
-                {formatExactTime(record.latestFarmerRegisteredAt)}
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.latestFarmerRegistered || "N/A"}</td>
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.latestFarmerLocation || "N/A"}</td>
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">
+                <span className="flex items-center gap-1">
+                  <Clock className="h-3 w-3 text-slate-400" />
+                  {formatExactTime(record.latestFarmerRegisteredAt)}
+                </span>
               </td>
-              <td className="px-4 py-3 text-slate-700">{record.numberOfTraining.toLocaleString()}</td>
-              <td className="px-4 py-3 text-slate-700">{record.numberOfFarmersTrained.toLocaleString()}</td>
-              <td className="px-4 py-3">
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.numberOfTraining.toLocaleString()}</td>
+              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.numberOfFarmersTrained.toLocaleString()}</td>
+              <td className="whitespace-nowrap px-6 py-1.5">
                 <Badge
                   variant="outline"
                   className={
@@ -1221,65 +1319,50 @@ const FieldTeamPage = () => {
 
   return (
     <div className="space-y-6">
-      <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex flex-col gap-2 lg:justify-between w-full">
+      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-row items-center gap-4 lg:justify-between w-full">
            <p className="text-xs font-medium uppercase tracking-wide text-green-700">Field Report</p>
-         
 
-          {userCanSubmitReport && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full">
-              <div className="space-y-2">
-               
-                <Input
-                  id="field-team-report-title"
-                  type="text"
-                  placeholder="Report Title"
-                  value={reportTitle}
-                  onChange={(event) => setReportTitle(event.target.value)}
-                  className="bg-white"
-                />
-              </div>
-              <div className="space-y-2">
-               
-                <Input
-                  id="field-team-from-date"
-                  type="date"
-                  value={fromDate}
-                  onChange={(event) => setFromDate(event.target.value)}
-                  className="bg-white"
-                />
-              </div>
-              <div className="space-y-2">
-               
-                <Input
-                  id="field-team-to-date"
-                  type="date"
-                  value={toDate}
-                  onChange={(event) => setToDate(event.target.value)}
-                  className="bg-white"
-                />
-              </div>
-              <div className="space-y-2">
-               
-                <Select
-                  value={selectedProgramme}
-                  onValueChange={(value) => setSelectedProgramme(normalizeProgramme(value))}
-                  disabled={accessibleProgrammes.length === 0}
-                >
-                  <SelectTrigger id="field-team-report-id" className="bg-white">
-                    <SelectValue placeholder="Select report ID" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {accessibleProgrammes.map((programme) => (
-                      <SelectItem key={programme} value={programme}>
-                        {getReportId(programme)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+          {/* From/To filters for the "Submitted Field Team Reports" table
+              below, plus a clear-filter button — kept at the top of this
+              card so they're visible to everyone who can view reports
+              (Admin, M&E, and HR), not just those who can submit one. */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:w-2/3">
+            <div className="space-y-1">
+             
+              <Input
+                id="reports-filter-from"
+                type="date"
+                value={reportsFilterFromDate}
+                onChange={(event) => setReportsFilterFromDate(event.target.value)}
+                className="bg-white text-sm"
+              />
             </div>
-          )}
+            <div className="space-y-1">
+              
+              <Input
+                id="reports-filter-to"
+                type="date"
+                value={reportsFilterToDate}
+                onChange={(event) => setReportsFilterToDate(event.target.value)}
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="flex items-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setReportsFilterFromDate("");
+                  setReportsFilterToDate("");
+                }}
+                disabled={!reportsFilterFromDate && !reportsFilterToDate}
+              >
+                Clear filter
+              </Button>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -1301,28 +1384,60 @@ const FieldTeamPage = () => {
               </Button>
             </div>
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 w-full">
+              <div className="space-y-2">
+                <Input
+                  id="field-team-report-title"
+                  type="text"
+                  placeholder="Report Title"
+                  value={reportTitle}
+                  onChange={(event) => setReportTitle(event.target.value)}
+                  className="bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Input
+                  id="field-team-from-date"
+                  type="date"
+                  value={fromDate}
+                  onChange={(event) => setFromDate(event.target.value)}
+                  className="bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Input
+                  id="field-team-to-date"
+                  type="date"
+                  value={toDate}
+                  onChange={(event) => setToDate(event.target.value)}
+                  className="bg-white"
+                />
+              </div>
+              <div className="space-y-2">
+                <Select
+                  value={selectedProgramme}
+                  onValueChange={(value) => setSelectedProgramme(normalizeProgramme(value))}
+                  disabled={accessibleProgrammes.length === 0}
+                >
+                  <SelectTrigger id="field-team-report-id" className="bg-white">
+                    <SelectValue placeholder="Select report ID" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accessibleProgrammes.map((programme) => (
+                      <SelectItem key={programme} value={programme}>
+                        {getReportId(programme)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
             {isInvalidDateRange && (
               <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
                 The From date must be before or equal to the To date.
               </div>
             )}
-
-            <div className="grid gap-3 text-sm md:grid-cols-3">
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs font-medium uppercase text-slate-500">Livestock farmers</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">
-                  {computedTotals.totalLivestockFarmersRegistered.toLocaleString()}
-                </p>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs font-medium uppercase text-slate-500">Training sessions</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">{computedTotals.numberOfTraining.toLocaleString()}</p>
-              </div>
-              <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3">
-                <p className="text-xs font-medium uppercase text-slate-500">Farmers trained</p>
-                <p className="mt-1 text-xl font-semibold text-slate-900">{computedTotals.numberOfFarmersTrained.toLocaleString()}</p>
-              </div>
-            </div>
           </CardHeader>
 
           <CardContent className="space-y-4">
@@ -1366,7 +1481,7 @@ const FieldTeamPage = () => {
       )}
 
       <Card className="border-slate-200 shadow-sm">
-        <CardHeader className="space-y-2">
+        <CardHeader className="space-y-3">
           <CardTitle className="flex items-center gap-2 text-slate-900">
             {userIsHr ? (
               <ShieldCheck className="h-5 w-5 text-blue-600" />
@@ -1377,7 +1492,7 @@ const FieldTeamPage = () => {
           </CardTitle>
           <p className="flex items-center gap-2 text-sm text-slate-500">
             <CalendarDays className="h-4 w-4" />
-            {submittedReports.length.toLocaleString()} submitted report{submittedReports.length === 1 ? "" : "s"}
+            {dateFilteredReports.length.toLocaleString()} submitted report{dateFilteredReports.length === 1 ? "" : "s"}
           </p>
         </CardHeader>
 
@@ -1389,36 +1504,40 @@ const FieldTeamPage = () => {
                 Loading field team reports...
               </div>
             </div>
-          ) : submittedReports.length === 0 ? (
+          ) : dateFilteredReports.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-              No submitted field team report exists yet.
+              {submittedReports.length === 0
+                ? "No submitted field team report exists yet."
+                : "No submitted field team reports match the selected date range."}
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto rounded-lg border border-slate-200">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase text-slate-500">
-                    <th className="px-4 py-2 font-medium text-[10px]">Report date</th>
-                    <th className="px-4 py-2 font-medium text-[10px]">Report ID</th>
-                    
-                    {userCanManageReports && (
-                      <th className="px-4 py-2 font-medium text-[10px]">Status</th>
+                    <th className="px-5 py-2 font-medium text-[10px]">Date</th>
+                    <th className="px-5 py-2 font-medium text-[10px]">Report ID</th>
+                    <th className="px-5 py-2 font-medium text-[10px]">Submitted by</th>
+                    {userCanViewReportMeta && (
+                      <th className="px-5 py-2 font-medium text-[10px]">Status</th>
                     )}
-                    <th className="px-4 py-2 font-medium text-[10px]">Actions</th>
+                    <th className="px-5 py-2 font-medium text-[10px]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {submittedReports.map((report) => (
+                  {dateFilteredReports.map((report) => (
                     <tr key={report.id} className="border-b border-slate-100 last:border-b-0">
-                      <td className="px-4 py-2 text-slate-800">
-                        {formatDate(report.fromDate || report.weekStart)} - {formatDate(report.toDate || report.weekEnd)}
+                      <td className="px-5 py-1.5 text-slate-800">
+                        {formatDate(report.reportDate)}
                       </td>
-                      <td className="px-4 py-2 text-slate-700">
+                      <td className="px-5 py-1.5 text-slate-700">
                         {report.reportTitle || "Untitled report"}
                       </td>
-                      
-                      {userCanManageReports && (
-                        <td className="px-4 py-2">
+                      <td className="px-5 py-1.5 text-slate-700">
+                        {report.submittedBy || "Unknown user"}
+                      </td>
+                      {userCanViewReportMeta && (
+                        <td className="px-5 py-1.5">
                           <Badge
                             variant="outline"
                             className={
@@ -1431,7 +1550,7 @@ const FieldTeamPage = () => {
                           </Badge>
                         </td>
                       )}
-                      <td className="px-4 py-2">
+                      <td className="px-5 py-1.5">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button type="button" variant="outline" size="sm">
@@ -1478,31 +1597,36 @@ const FieldTeamPage = () => {
           </DialogHeader>
           {viewingReport && (
             <div className="space-y-4">
-              <div className="grid gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm md:grid-cols-5">
-                <div>
-                  <p className="text-xs font-medium uppercase text-slate-500">Report title</p>
-                  <p className="mt-1 font-medium p-2 text-[10px] text-slate-900">{viewingReport.reportTitle || "Untitled report"}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase text-slate-500">Report date</p>
-                  <p className="mt-1 font-medium p-2 text-[10px] text-slate-900">
-                    {viewingReport.fromDate || viewingReport.weekStart} to {viewingReport.toDate || viewingReport.weekEnd}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase text-slate-500">Programme</p>
-                  <p className="mt-1 font-medium p-2 text-[10px] text-slate-900">
-                    {viewingReport.reportId || getReportId(viewingReport.programme || "")}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase text-slate-500">Submitted</p>
-                  <p className="mt-1 font-medium p-2 text-[10px] text-slate-900">{formatTimestamp(viewingReport.submittedAt)}</p>
-                </div>
-                <div>
-                  <p className="text-xs font-medium uppercase text-slate-500">Submitted by</p>
-                  <p className="mt-1 font-medium p-2 text-[10px] text-slate-900">{viewingReport.submittedBy || "Unknown user"}</p>
-                </div>
+              {/* Summary info as small, presentable cards instead of a
+                  cramped inline grid of plain text. */}
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+                <Card className="border-slate-200 shadow-none">
+                  <CardContent className="p-3">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500">Report title</p>
+                    <p className="mt-1 text-xs font-medium text-slate-900">
+                      {viewingReport.reportTitle || "Untitled report"}
+                    </p>
+                  </CardContent>
+                </Card>
+                <Card className="border-slate-200 shadow-none">
+                  <CardContent className="p-3">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500">Report date</p>
+                    <p className="mt-1 text-xs font-medium text-slate-900">{formatDate(viewingReport.reportDate)}</p>
+                  </CardContent>
+                </Card>
+
+                <Card className="border-slate-200 shadow-none">
+                  <CardContent className="p-3">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500">Submitted</p>
+                    <p className="mt-1 text-xs font-medium text-slate-900">{formatTimestamp(viewingReport.submittedAt)}</p>
+                  </CardContent>
+                </Card>
+                <Card className="border-slate-200 shadow-none">
+                  <CardContent className="p-3">
+                    <p className="text-[9px] font-medium uppercase tracking-wide text-slate-500">Submitted by</p>
+                    <p className="mt-1 text-xs font-medium text-slate-900">{viewingReport.submittedBy || "Unknown user"}</p>
+                  </CardContent>
+                </Card>
               </div>
               <ReportRowsTable records={viewingReport.records} />
             </div>
@@ -1548,6 +1672,14 @@ const FieldTeamPage = () => {
                         <Input
                           value={row.latestFarmerRegistered}
                           onChange={(event) => updateEditRow(index, "latestFarmerRegistered", event.target.value)}
+                          disabled={updating}
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Latest farmer location</Label>
+                        <Input
+                          value={row.latestFarmerLocation || ""}
+                          onChange={(event) => updateEditRow(index, "latestFarmerLocation", event.target.value)}
                           disabled={updating}
                         />
                       </div>

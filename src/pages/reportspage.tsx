@@ -78,6 +78,12 @@ const BAR_COLORS = [
   COLORS.purple, COLORS.teal, COLORS.maroon
 ];
 
+const REPORT_DONUT_HEIGHT = 280;
+const REPORT_DONUT_INNER_RADIUS = 58;
+const REPORT_DONUT_OUTER_RADIUS = 90;
+const REPORT_DONUT_PADDING_ANGLE = 2;
+const REPORT_DONUT_CORNER_RADIUS = 6;
+
 const HORIZONTAL_BAR_CHART_MARGIN = { top: 0, right: 12, left: 48, bottom: 0 };
 const HORIZONTAL_BAR_CHART_Y_AXIS_WIDTH = 68;
 
@@ -168,6 +174,7 @@ interface StaffMarkRecord {
   marks?: number | string;
   note?: string;
   programme?: string;
+  Programme?: string;
   dateAwarded?: string;
   createdAt?: number | string;
   awardedBy?: string;
@@ -183,6 +190,7 @@ interface StaffDirectoryRecord {
   phone?: string;
   notes?: string;
   programme?: string;
+  Programme?: string;
   status?: string;
   createdAt?: number | string;
   createdBy?: string;
@@ -239,6 +247,9 @@ const createDefaultStaffMarkForm = (): StaffMarkFormState => ({
   note: "",
   dateAwarded: formatDateToLocal(new Date()),
 });
+
+const getReportRecordProgramme = (record: { programme?: string; Programme?: string }): string =>
+  normalizeProgramme(record.programme ?? record.Programme);
 
 // --- Helper Functions ---
 const parseNumericValue = (value: unknown): number => {
@@ -1141,8 +1152,8 @@ type ReportSectionId =
 
 const REPORT_VIEW_PROFILES: Record<ReportAudience, { title: string; sections: ReportSectionId[] }> = {
   hr: {
-    title: "General Report",
-    sections: ["hr-summary", "hr-rankings", "hr-distribution"],
+    title: "Performance Report",
+    sections: ["default-registration", "default-animal-health"],
   },
   "project-manager": {
     title: "Project Manager Report",
@@ -1245,16 +1256,16 @@ const HayBalesSourceDonutChart = ({
 
   return (
     <div className="relative">
-      <ResponsiveContainer width="100%" height={280}>
+      <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
         <PieChart>
           <Pie
             data={data}
             cx="50%"
             cy="50%"
-            innerRadius={72}
-            outerRadius={98}
-            paddingAngle={3}
-            cornerRadius={8}
+            innerRadius={REPORT_DONUT_INNER_RADIUS}
+            outerRadius={REPORT_DONUT_OUTER_RADIUS}
+            paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+            cornerRadius={2}
             dataKey="value"
             label={renderLabel}
             labelLine={false}
@@ -1594,16 +1605,16 @@ const SubcountyRegistrationDonutChart = ({
 
   return (
     <div className="relative rounded-2xl p-2">
-      <ResponsiveContainer width="100%" height={280}>
+      <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
         <PieChart>
           <Pie
             data={data}
             cx="50%"
             cy="50%"
-            innerRadius={60}
-            outerRadius={92}
-            paddingAngle={3}
-            cornerRadius={4}
+            innerRadius={REPORT_DONUT_INNER_RADIUS}
+            outerRadius={REPORT_DONUT_OUTER_RADIUS}
+            paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+            cornerRadius={REPORT_DONUT_CORNER_RADIUS}
             dataKey="value"
             label={renderOuterLabel}
             labelLine={false}
@@ -1612,8 +1623,8 @@ const SubcountyRegistrationDonutChart = ({
               <Cell
                 key={`subcounty-donut-${index}`}
                 fill={SUBCOUNTY_DONUT_COLORS[index % SUBCOUNTY_DONUT_COLORS.length]}
-                stroke="#011749"
-                strokeWidth={1}
+                stroke="none"
+                strokeWidth={0}
               />
             ))}
           </Pie>
@@ -1955,7 +1966,7 @@ const PerformanceReport = () => {
     () => resolveReportAudience(userRole, userAttribute),
     [allowedProgrammes, userRole, userAttribute]
   );
-  const isHrReport = reportAudience === "hr";
+  const showHrStaffTools = false;
   const reportViewProfile = REPORT_VIEW_PROFILES[reportAudience];
   const hasSection = useCallback(
     (section: ReportSectionId) => reportViewProfile.sections.includes(section),
@@ -2196,7 +2207,7 @@ const PerformanceReport = () => {
   }, [fetchReportCollection, queryableProgrammes.length, reportCacheKey, toast]);
 
   const fetchStaffDirectory = useCallback(async () => {
-    if (!isHrReport) {
+    if (!showHrStaffTools) {
       setStaffDirectoryRecords((current) => (current.length > 0 ? EMPTY_STAFF_DIRECTORY_RECORDS : current));
       return;
     }
@@ -2206,7 +2217,7 @@ const PerformanceReport = () => {
       const filteredDirectory = staffDirectory
         .filter((record) => {
           if (!allowedProgrammeSet) return true;
-          const programme = normalizeProgramme(record.programme);
+          const programme = getReportRecordProgramme(record);
           return allowedProgrammeSet.has(programme);
         })
         .sort((first, second) => {
@@ -2224,10 +2235,10 @@ const PerformanceReport = () => {
         variant: "destructive",
       });
     }
-  }, [allowedProgrammeSet, fetchReportCollection, isHrReport, toast]);
+  }, [allowedProgrammeSet, fetchReportCollection, showHrStaffTools, toast]);
 
   const fetchStaffMarks = useCallback(async () => {
-    if (!isHrReport) {
+    if (!showHrStaffTools) {
       setStaffMarkRecords((current) => (current.length > 0 ? EMPTY_STAFF_MARK_RECORDS : current));
       return;
     }
@@ -2236,7 +2247,7 @@ const PerformanceReport = () => {
       const marks = (await fetchReportCollection<StaffMarkRecord>("hrStaffMarks"))
         .filter((record) => {
           if (!allowedProgrammeSet) return true;
-          const programme = normalizeProgramme(record.programme);
+          const programme = getReportRecordProgramme(record);
           return allowedProgrammeSet.has(programme);
         })
         .sort((a, b) => {
@@ -2254,36 +2265,36 @@ const PerformanceReport = () => {
         variant: "destructive",
       });
     }
-  }, [allowedProgrammeSet, fetchReportCollection, isHrReport, toast]);
+  }, [allowedProgrammeSet, fetchReportCollection, showHrStaffTools, toast]);
 
   const filteredStaffMarkRecords = useMemo(
     () => {
-      if (!isHrReport) return EMPTY_STAFF_MARK_RECORDS;
+      if (!showHrStaffTools) return EMPTY_STAFF_MARK_RECORDS;
       return (
       staffMarkRecords.filter((record) => {
         const recordDate = record.dateAwarded || record.createdAt;
-        return matchesProgrammeSelection(record.programme, activeProgram, userCanViewAllProgrammeData) &&
+        return matchesProgrammeSelection(getReportRecordProgramme(record), activeProgram, userCanViewAllProgrammeData) &&
           isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
       })
       );
     },
-    [activeProgram, dateRange.endDate, dateRange.startDate, isHrReport, staffMarkRecords, userCanViewAllProgrammeData],
+    [activeProgram, dateRange.endDate, dateRange.startDate, showHrStaffTools, staffMarkRecords, userCanViewAllProgrammeData],
   );
 
   const filteredStaffDirectoryRecords = useMemo(
     () => {
-      if (!isHrReport) return EMPTY_STAFF_DIRECTORY_RECORDS;
+      if (!showHrStaffTools) return EMPTY_STAFF_DIRECTORY_RECORDS;
       return (
       staffDirectoryRecords.filter((record) => {
-        return matchesProgrammeSelection(record.programme, activeProgram, userCanViewAllProgrammeData);
+        return matchesProgrammeSelection(getReportRecordProgramme(record), activeProgram, userCanViewAllProgrammeData);
       })
       );
     },
-    [activeProgram, isHrReport, staffDirectoryRecords, userCanViewAllProgrammeData],
+    [activeProgram, showHrStaffTools, staffDirectoryRecords, userCanViewAllProgrammeData],
   );
 
   const staffManagementRows = useMemo(() => {
-    if (!isHrReport) return EMPTY_STAFF_MANAGEMENT_ROWS;
+    if (!showHrStaffTools) return EMPTY_STAFF_MANAGEMENT_ROWS;
 
     const rows = new Map<string, StaffManagementRow>();
     const marksByStaff = new Map<string, {
@@ -2332,7 +2343,7 @@ const PerformanceReport = () => {
         role: record.role?.trim() || "Not assigned",
         county: record.county?.trim() || "N/A",
         phone: record.phone?.trim() || "N/A",
-        programme: record.programme?.trim() || activeProgram || "N/A",
+        programme: getReportRecordProgramme(record) || activeProgram || "N/A",
         status: record.status?.trim() || "active",
         notes: record.notes?.trim() || "",
         totalMarks: markSummary?.totalMarks || 0,
@@ -2374,7 +2385,7 @@ const PerformanceReport = () => {
       }
       return first.staffName.localeCompare(second.staffName);
     });
-  }, [activeProgram, filteredStaffDirectoryRecords, filteredStaffMarkRecords, isHrReport]);
+  }, [activeProgram, filteredStaffDirectoryRecords, filteredStaffMarkRecords, showHrStaffTools]);
 
   const openCreateStaffDialog = useCallback(() => {
     setEditingStaffRow(null);
@@ -2428,7 +2439,7 @@ const PerformanceReport = () => {
     const alreadyExists = staffDirectoryRecords.some((record) =>
       record.id !== editingStaffRow?.id &&
       normalizeStaffName(record.staffName) === normalizeStaffName(staffName) &&
-      normalizeProgramme(record.programme) === normalizeProgramme(activeProgram),
+      getReportRecordProgramme(record) === normalizeProgramme(activeProgram),
     );
 
     if (alreadyExists) {
@@ -2449,6 +2460,7 @@ const PerformanceReport = () => {
         phone: createStaffForm.phone.trim(),
         notes: createStaffForm.notes.trim(),
         programme: normalizeProgramme(activeProgram),
+        Programme: normalizeProgramme(activeProgram),
         status: editingStaffRow?.status || "active",
         updatedAt: Date.now(),
         updatedBy: userName || "HR Manager",
@@ -2583,6 +2595,7 @@ const PerformanceReport = () => {
         marks,
         note: staffMarkForm.note.trim(),
         programme: normalizeProgramme(activeProgram),
+        Programme: normalizeProgramme(activeProgram),
         dateAwarded: staffMarkForm.dateAwarded || formatDateToLocal(new Date()),
         createdAt: Date.now(),
         awardedBy: userName || "HR Manager",
@@ -3196,15 +3209,16 @@ const PerformanceReport = () => {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <ResponsiveContainer width="100%" height={280}>
+                <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
                   <PieChart>
                     <Pie
                       data={data.breedsByCountyData}
                       cx="50%"
                       cy="50%"
-                      outerRadius={90}
-                      innerRadius={50}
-                      paddingAngle={2}
+                      outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                      innerRadius={REPORT_DONUT_INNER_RADIUS}
+                      paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                      cornerRadius={REPORT_DONUT_CORNER_RADIUS}
                       dataKey="value"
                       label={renderCustomizedLabel}
                       labelLine={false}
@@ -3412,15 +3426,16 @@ const PerformanceReport = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
                 <PieChart>
                   <Pie
                     data={data.countyPerformanceData}
                     cx="50%"
                     cy="50%"
-                    outerRadius={90}
-                    innerRadius={52}
-                    paddingAngle={2}
+                    outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                    innerRadius={REPORT_DONUT_INNER_RADIUS}
+                    paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                    cornerRadius={REPORT_DONUT_CORNER_RADIUS}
                     dataKey="value"
                     labelLine={false}
                   >
@@ -3593,15 +3608,16 @@ const PerformanceReport = () => {
                 </CardTitle>
               </CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
                 <PieChart>
                   <Pie
                     data={data.countyPerformanceData}
                     cx="50%"
                     cy="50%"
-                    outerRadius={90}
-                    innerRadius={50}
-                    paddingAngle={2}
+                    outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                    innerRadius={REPORT_DONUT_INNER_RADIUS}
+                    paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                    cornerRadius={REPORT_DONUT_CORNER_RADIUS}
                     dataKey="value"
                     label={renderCustomizedLabel}
                     labelLine={false}
@@ -3699,7 +3715,7 @@ const PerformanceReport = () => {
           <Card className="border-0 shadow-lg bg-white">
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
-                <Users className="h-4 w-4 text-blue-600" />
+                <Users className="h-4 w-4 text-green-600" />
                 Top Farmers Per Herd Size
               </CardTitle>
             </CardHeader>
@@ -3714,7 +3730,7 @@ const PerformanceReport = () => {
                         className="rounded-2xl border border-slate-200 bg-slate-50 p-3 shadow-sm"
                       >
                         <div className="flex items-center gap-4">
-                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-blue-600 text-xs font-semibold text-white shadow-sm">
+                          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-green-600 text-xs font-semibold text-white shadow-sm">
                             {index + 1}
                           </span>
                           <div className="min-w-0 flex-1">
@@ -3726,12 +3742,12 @@ const PerformanceReport = () => {
                           <div className="min-w-[140px] max-w-[220px] flex-1">
                             <div className="h-2 overflow-hidden rounded-full bg-slate-200">
                               <div
-                                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-blue-700 transition-all"
+                                className="h-full rounded-full bg-gradient-to-r from-green-500 to-green-700 transition-all"
                                 style={{ width: `${Math.max(share, 10)}%` }}
                               />
                             </div>
                           </div>
-                          <Badge className="shrink-0 whitespace-nowrap border-blue-200 bg-blue-50 px-3 py-1 text-blue-700 hover:bg-blue-50">
+                          <Badge className="shrink-0 whitespace-nowrap border-green-200 bg-green-50 px-3 py-1 text-green-700 hover:bg-green-50">
                             {Number(farmer.value).toLocaleString()} goats
                           </Badge>
                         </div>
@@ -3787,7 +3803,7 @@ const PerformanceReport = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
                 <PieChart>
                   <Pie
                     data={[
@@ -3796,9 +3812,10 @@ const PerformanceReport = () => {
                     ]}
                     cx="50%"
                     cy="50%"
-                    outerRadius={90}
-                    innerRadius={50}
-                    paddingAngle={2}
+                    outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                    innerRadius={REPORT_DONUT_INNER_RADIUS}
+                    paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                    cornerRadius={REPORT_DONUT_CORNER_RADIUS}
                     dataKey="value"
                     labelLine={false}
                   >
@@ -3937,15 +3954,16 @@ const PerformanceReport = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <ResponsiveContainer width="100%" height={280}>
+              <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
                 <PieChart>
                   <Pie
                     data={data.breedsByCountyData}
                     cx="50%"
                     cy="50%"
-                    outerRadius={90}
-                    innerRadius={50}
-                    paddingAngle={2}
+                    outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                    innerRadius={REPORT_DONUT_INNER_RADIUS}
+                    paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                    cornerRadius={REPORT_DONUT_CORNER_RADIUS}
                     dataKey="value"
                     label={renderCustomizedLabel}
                     labelLine={false}

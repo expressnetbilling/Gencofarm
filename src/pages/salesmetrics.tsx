@@ -10,14 +10,14 @@ import { db, fetchCollectionByProgrammes, ref, query, orderByChild, equalTo, get
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
-  PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip,
-  XAxis, YAxis, CartesianGrid, AreaChart, Area,
-  Label as RechartsLabel
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
+  XAxis, YAxis, CartesianGrid, AreaChart, Area, Legend
 } from "recharts";
 import {
   Beef, TrendingUp, Award, Star,
   MapPin, DollarSign, Package, Users, Loader2, Calendar,
-  Zap, ChevronDown, Calculator, ChevronLeft, ChevronRight
+  Zap, ChevronDown, Calculator, ChevronLeft, ChevronRight,
+  ClipboardList
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,6 +53,7 @@ const COLORS = {
   teal: "#0d9488",
   red: "#dc2626",
   gray: "#9ca3af",
+  pink: "#db2777",
   lightBlue: "#eff6ff",
 } as const;
 
@@ -223,6 +224,11 @@ interface SalesAnalyticsPayload {
   }>;
   monthlyTrend: TrendPoint[];
   monthlyTrendSeries: TrendSeriesMeta[];
+  orderPurchaseComparison: Array<{
+    month: string;
+    ordersPlaced: number;
+    goatsPurchased: number;
+  }>;
   requisitionTrend: TrendPoint[];
   requisitionTrendSeries: TrendSeriesMeta[];
   top3Months: Array<{ month: string; animalsPurchased: number; purchaseCost: number }>;
@@ -630,6 +636,7 @@ const createEmptySalesAnalytics = (salesInputs: SalesInputs): SalesAnalyticsPayl
   topFarmers: [],
   monthlyTrend: [],
   monthlyTrendSeries: [],
+  orderPurchaseComparison: [],
   requisitionTrend: [],
   requisitionTrendSeries: [],
   top3Months: [],
@@ -715,6 +722,7 @@ const buildLocalSalesAnalytics = (
   dateRange: { startDate: string; endDate: string },
   selectedProgramme: string | null,
   salesInputs: SalesInputs,
+  topMonthsRecords: OfftakeData[] = records,
 ): SalesAnalyticsPayload => {
   const targetProgramme = getAnalyticsProgrammeToken(selectedProgramme);
 
@@ -765,6 +773,18 @@ const buildLocalSalesAnalytics = (
     count: number;
     amount: number;
   }> = {};
+  const orderMonthlyData: Record<string, {
+    year: string;
+    monthName: string;
+    ordersPlaced: number;
+    goatsPurchased: number;
+  }> = {};
+  const topMonthsMonthlyData: Record<string, {
+    year: string;
+    monthName: string;
+    animalsPurchased: number;
+    purchaseCost: number;
+  }> = {};
 
   // Pre-filter orders & requisitions
   const filteredOrders = orders.filter((record) => {
@@ -777,6 +797,11 @@ const buildLocalSalesAnalytics = (
     const recordProgramme = getAnalyticsProgrammeToken(record.programme);
     const matchesProgramme = !targetProgramme || recordProgramme === targetProgramme;
     return matchesProgramme && isDateInRange(getRequisitionRecordDate(record), dateRange.startDate, dateRange.endDate);
+  });
+
+  const topMonthsData = topMonthsRecords.filter((record) => {
+    const recordProgramme = getAnalyticsProgrammeToken(record.programme);
+    return !targetProgramme || recordProgramme === targetProgramme;
   });
 
   // ---- Process offtake records ----
@@ -873,11 +898,50 @@ const buildLocalSalesAnalytics = (
     }
   }
 
+  for (const record of topMonthsData) {
+    const date = parseDate(record.date);
+    if (!date) continue;
+
+    const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    const monthName = date.toLocaleString("default", { month: "short" });
+    if (!topMonthsMonthlyData[monthKey]) {
+      topMonthsMonthlyData[monthKey] = {
+        year: String(date.getFullYear()),
+        monthName,
+        animalsPurchased: 0,
+        purchaseCost: 0,
+      };
+    }
+    topMonthsMonthlyData[monthKey].animalsPurchased +=
+      getOfftakeGoatTotal(record) +
+      (Array.isArray(record.sheep) ? record.sheep.length : 0) +
+      (Array.isArray(record.cattle) ? record.cattle.length : 0);
+    topMonthsMonthlyData[monthKey].purchaseCost += getOfftakePurchaseCost(record);
+  }
+
   // ---- Process orders ----
   filteredOrders.forEach((record) => {
     if (!isBatchOrderRecord(record)) return;
-    totalGoatOrdersPlaced += getOrderTotalGoats(record);
-    totalGoatsPurchasedFromOrders += getOrderPurchasedGoats(record);
+    const orderedGoats = getOrderTotalGoats(record);
+    const purchasedGoats = getOrderPurchasedGoats(record);
+    totalGoatOrdersPlaced += orderedGoats;
+    totalGoatsPurchasedFromOrders += purchasedGoats;
+
+    const date = parseDate(getOrderRecordDate(record));
+    if (!date) return;
+
+    const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+    const monthName = date.toLocaleString("default", { month: "short" });
+    if (!orderMonthlyData[monthKey]) {
+      orderMonthlyData[monthKey] = {
+        year: String(date.getFullYear()),
+        monthName,
+        ordersPlaced: 0,
+        goatsPurchased: 0,
+      };
+    }
+    orderMonthlyData[monthKey].ordersPlaced += orderedGoats;
+    orderMonthlyData[monthKey].goatsPurchased += purchasedGoats;
   });
 
   // ---- Process requisitions ----
@@ -926,8 +990,17 @@ const buildLocalSalesAnalytics = (
   );
   const { data: monthlyTrend, series: monthlyTrendSeries } = buildTrendSeries(monthlyTrendValues);
   const { data: requisitionTrend, series: requisitionTrendSeries } = buildTrendSeries(requisitionTrendValues);
-  const includesMultiplePurchaseYears =
-    new Set(Object.values(monthlyData).map((entry) => entry.year)).size > 1;
+  const includesMultipleTopMonthYears =
+    new Set(Object.values(topMonthsMonthlyData).map((entry) => entry.year)).size > 1;
+  const includesMultipleOrderYears =
+    new Set(Object.values(orderMonthlyData).map((entry) => entry.year)).size > 1;
+  const orderPurchaseComparison = Object.entries(orderMonthlyData)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, entry]) => ({
+      month: includesMultipleOrderYears ? `${entry.monthName} ${entry.year}` : entry.monthName,
+      ordersPlaced: entry.ordersPlaced,
+      goatsPurchased: entry.goatsPurchased,
+    }));
 
   return {
     filteredCount: filteredData.length,
@@ -973,9 +1046,10 @@ const buildLocalSalesAnalytics = (
       .slice(0, 5),
     monthlyTrend,
     monthlyTrendSeries,
+    orderPurchaseComparison,
     requisitionTrend,
     requisitionTrendSeries,
-    top3Months: Object.values(monthlyData)
+    top3Months: Object.values(topMonthsMonthlyData)
       .sort(
         (a, b) =>
           (b.animalsPurchased - a.animalsPurchased) ||
@@ -983,7 +1057,7 @@ const buildLocalSalesAnalytics = (
       )
       .slice(0, 3)
       .map((entry) => ({
-        month: includesMultiplePurchaseYears
+        month: includesMultipleTopMonthYears
           ? `${entry.monthName} ${entry.year}`
           : entry.monthName,
         animalsPurchased: entry.animalsPurchased,
@@ -998,6 +1072,7 @@ const buildLocalSalesAnalytics = (
 
 const useOfftakeData = (
   offtakeData: OfftakeData[],
+  topMonthsOfftakeData: OfftakeData[],
   orderData: OrderAnalyticsRecord[],
   requisitionData: RequisitionAnalyticsRecord[],
   dateRange: { startDate: string; endDate: string },
@@ -1013,9 +1088,11 @@ const useOfftakeData = (
         dateRange,
         selectedProgramme,
         salesInputs,
+        topMonthsOfftakeData,
       ),
     [
       offtakeData,
+      topMonthsOfftakeData,
       orderData,
       requisitionData,
       dateRange.endDate,
@@ -1100,7 +1177,7 @@ const StatsCard = memo(function StatsCard({
   );
 
   return (
-    <Card className="group hover:shadow-lg transition-all duration-300 border-0 shadow-sm bg-gradient-to-br from-white to-gray-50/50 rounded-2xl overflow-hidden">
+    <Card className="group relative hover:shadow-lg transition-all duration-300 border border-slate-100 shadow-sm bg-gradient-to-br from-white to-gray-50/50 rounded-2xl overflow-hidden">
       <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${theme.border} transition-all group-hover:w-2`} />
 
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 pt-5 pl-6 pr-4">
@@ -1135,31 +1212,149 @@ const StatsCard = memo(function StatsCard({
   );
 });
 
-const renderCenterLabel = ({
-  viewBox,
-}: {
-  viewBox?: { cx?: number; cy?: number };
-}) => {
-  const cx = viewBox?.cx ?? 0;
-  const cy = viewBox?.cy ?? 0;
+// ---------------------------------------------------------------------------
+// Reusable chart-card header for consistent, more legible chart canvases
+// ---------------------------------------------------------------------------
+
+interface SectionCardHeaderProps {
+  icon: React.ElementType;
+  title: string;
+  subtitle?: string;
+  tint?: "blue" | "orange" | "yellow" | "green" | "purple" | "teal" | "maroon";
+}
+
+const HEADER_TINTS: Record<string, { bg: string; text: string }> = {
+  blue: { bg: "bg-blue-50", text: "text-blue-600" },
+  orange: { bg: "bg-orange-50", text: "text-orange-600" },
+  yellow: { bg: "bg-yellow-50", text: "text-yellow-600" },
+  green: { bg: "bg-green-50", text: "text-green-600" },
+  purple: { bg: "bg-purple-50", text: "text-purple-600" },
+  teal: { bg: "bg-teal-50", text: "text-teal-600" },
+  maroon: { bg: "bg-red-50", text: "text-red-700" },
+};
+
+const SectionCardHeader = ({ icon: Icon, title, subtitle, tint = "blue" }: SectionCardHeaderProps) => {
+  const theme = HEADER_TINTS[tint];
   return (
-    <text
-      x={cx}
-      y={cy}
-      fill="#374151"
-      textAnchor="middle"
-      dominantBaseline="middle"
-      className="text-sm font-bold fill-gray-700"
-    >
-      Farmers
-    </text>
+    <CardHeader className="pb-3 pt-6 px-6">
+      <div className="flex items-center gap-3">
+        <div className={`p-2.5 rounded-xl ${theme.bg} shadow-sm shrink-0`}>
+          <Icon className={`h-4 w-4 ${theme.text}`} />
+        </div>
+        <div className="min-w-0">
+          <CardTitle className="text-sm font-bold text-gray-800">{title}</CardTitle>
+          {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+        </div>
+      </div>
+    </CardHeader>
   );
 };
+
+// ---------------------------------------------------------------------------
+// Shared doughnut chart layout so every doughnut in the report matches in
+// size and design. Only the color palette differs per-chart.
+//
+// NOTE: the legend "cards" that used to render underneath each doughnut have
+// been removed per request — the chart + center total label is now the only
+// thing shown, keeping the card compact and free of extra chrome.
+// ---------------------------------------------------------------------------
+
+interface DoughnutBreakdownProps {
+  data: Array<{ name: string; value: number; fill: string }>;
+  total: number;
+  totalLabel: string;
+  valueSuffix?: string;
+  formatValue?: (val: number) => string;
+  emptyMessage?: string;
+}
+
+const DoughnutBreakdown = memo(function DoughnutBreakdown({
+  data,
+  total,
+  totalLabel,
+  valueSuffix = "",
+  formatValue,
+  emptyMessage = "No data available for the selected range",
+}: DoughnutBreakdownProps) {
+  const fmt = formatValue ?? ((v: number) => v.toLocaleString());
+
+  if (data.length === 0) {
+    return (
+      <div className="flex h-[300px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+        {emptyMessage}
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative mx-auto h-[300px] w-full max-w-[340px]">
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            dataKey="value"
+            nameKey="name"
+            cx="50%"
+            cy="50%"
+            innerRadius={78}
+            outerRadius={116}
+            paddingAngle={4}
+            cornerRadius={8}
+          >
+            {data.map((entry) => (
+              <Cell key={entry.name} fill={entry.fill} />
+            ))}
+          </Pie>
+          <Tooltip
+            contentStyle={TOOLTIP_STYLE}
+            formatter={(value: number | string, name: string) => [
+              `${fmt(Number(value))}${valueSuffix}`,
+              name,
+            ]}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+      <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center pb-7">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+          {totalLabel}
+        </span>
+        <span className="text-2xl font-black text-slate-900">{fmt(total)}</span>
+      </div>
+    </div>
+  );
+});
 
 const TOOLTIP_STYLE: React.CSSProperties = {
   borderRadius: "8px",
   border: "none",
   boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+};
+
+// ---------------------------------------------------------------------------
+// Report Summary helpers
+//
+// The report summary shows every headline metric in FULL (never millified),
+// grouped into logical sections, with small/clean typography. Within each
+// group, metrics that are still at zero are pushed to the bottom so the
+// meaningful figures are seen first.
+// ---------------------------------------------------------------------------
+
+interface SummaryItem {
+  label: string;
+  value: number;
+  prefix?: string;
+  suffix?: string;
+}
+
+interface SummaryGroup {
+  title: string;
+  items: SummaryItem[];
+}
+
+const sortZeroLast = (items: SummaryItem[]): SummaryItem[] => {
+  const withValue = items.filter((item) => Number(item.value) !== 0);
+  const zeroValue = items.filter((item) => Number(item.value) === 0);
+  return [...withValue, ...zeroValue];
 };
 
 // ---------------------------------------------------------------------------
@@ -1215,6 +1410,7 @@ const SalesReport = () => {
   // ----- State -----
   const [loading, setLoading] = useState(true);
   const [offtakeData, setOfftakeData] = useState<OfftakeData[]>([]);
+  const [topMonthsOfftakeData, setTopMonthsOfftakeData] = useState<OfftakeData[]>([]);
   const [orderData, setOrderData] = useState<OrderAnalyticsRecord[]>([]);
   const [requisitionData, setRequisitionData] = useState<RequisitionAnalyticsRecord[]>(
     [],
@@ -1327,18 +1523,38 @@ const SalesReport = () => {
   const deferredDateRange = useDeferredValue(dateRange);
   const deferredSalesInputs = useDeferredValue(salesInputs);
   const isComputing = deferredDateRange !== dateRange || deferredSalesInputs !== salesInputs;
+  const effectiveFetchRange = useMemo(
+    () =>
+      dateRange.startDate && dateRange.endDate
+        ? dateRange
+        : currentMonthDates,
+    [currentMonthDates, dateRange],
+  );
   const salesFetchOptions = useMemo(
     () => ({
       ttlMs: 30 * 60 * 1000,
-      noDateFilter: !(dateRange.startDate && dateRange.endDate),
-      startDate: dateRange.startDate || undefined,
-      endDate: dateRange.endDate || undefined,
+      startDate: effectiveFetchRange.startDate,
+      endDate: effectiveFetchRange.endDate,
     }),
-    [dateRange.endDate, dateRange.startDate],
+    [effectiveFetchRange.endDate, effectiveFetchRange.startDate],
   );
+  const topMonthsFetchOptions = useMemo(() => {
+    const currentYearDates = getCurrentYearDates();
+    return {
+      ttlMs: 30 * 60 * 1000,
+      dateField: "createdAt",
+      dateValueType: "timestamp-ms" as const,
+      startDate: currentYearDates.startDate,
+      endDate: currentYearDates.endDate,
+    };
+  }, []);
   const salesDataCacheKey = useMemo(
     () => `${activeProgram}:${dateRange.startDate || "all"}:${dateRange.endDate || "all"}`,
     [activeProgram, dateRange.endDate, dateRange.startDate],
+  );
+  const topMonthsDataCacheKey = useMemo(
+    () => `${activeProgram}:top-months:${currentYear}`,
+    [activeProgram, currentYear],
   );
 
   const {
@@ -1349,6 +1565,7 @@ const SalesReport = () => {
     topFarmers,
     monthlyTrend = [],
     monthlyTrendSeries = [],
+    orderPurchaseComparison = [],
     requisitionTrend = [],
     requisitionTrendSeries = [],
     filteredCount,
@@ -1357,11 +1574,48 @@ const SalesReport = () => {
     isError: analysisError,
   } = useOfftakeData(
     offtakeData,
+    topMonthsOfftakeData,
     orderData,
     requisitionData,
     deferredDateRange,
     analysisProgramme,
     deferredSalesInputs,
+  );
+
+  // Gender doughnut – keeps the navy blue / orange palette.
+  const genderDoughnutData = useMemo(
+    () =>
+      genderData.map((item) => ({
+        ...item,
+        fill: item.name === "Male" ? COLORS.darkBlue : COLORS.orange,
+      })),
+    [genderData],
+  );
+  const genderDoughnutTotal = useMemo(
+    () => genderDoughnutData.reduce((sum, item) => sum + item.value, 0),
+    [genderDoughnutData],
+  );
+
+  // Orders vs Purchased doughnut – maroon (Ordered) / yellow (Purchased)
+  // palette so it's visually distinct from the gender chart while matching
+  // its size and design.
+  const orderPurchaseDoughnutData = useMemo(() => {
+    const totals = orderPurchaseComparison.reduce(
+      (acc, item) => ({
+        ordered: acc.ordered + Number(item.ordersPlaced || 0),
+        purchased: acc.purchased + Number(item.goatsPurchased || 0),
+      }),
+      { ordered: 0, purchased: 0 },
+    );
+
+    return [
+      { name: "Ordered", value: totals.ordered, fill: COLORS.maroon },
+      { name: "Purchased", value: totals.purchased, fill: COLORS.yellow },
+    ].filter((item) => item.value > 0);
+  }, [orderPurchaseComparison]);
+  const orderPurchaseDoughnutTotal = useMemo(
+    () => orderPurchaseDoughnutData.reduce((sum, item) => sum + item.value, 0),
+    [orderPurchaseDoughnutData],
   );
 
   // ---------------------------------------------------------------------------
@@ -1468,6 +1722,7 @@ const SalesReport = () => {
 
     if (USE_REMOTE_ANALYTICS) {
       setOfftakeData([]);
+      setTopMonthsOfftakeData([]);
       setOrderData([]);
       setRequisitionData([]);
       setLoading(false);
@@ -1476,6 +1731,7 @@ const SalesReport = () => {
 
     if (!activeProgram) {
       setOfftakeData([]);
+      setTopMonthsOfftakeData([]);
       setOrderData([]);
       setRequisitionData([]);
       setLoading(false);
@@ -1500,6 +1756,37 @@ const SalesReport = () => {
     } else {
       setIsCacheHit(false);
     }
+
+    const cachedTopMonthsData = dataCache.get(topMonthsDataCacheKey);
+    if (cachedTopMonthsData) {
+      setTopMonthsOfftakeData(cachedTopMonthsData);
+    } else {
+      setTopMonthsOfftakeData([]);
+    }
+
+    void fetchCollectionByProgrammes<Record<string, unknown>>(
+      "offtakes",
+      selectedFinanceProgrammes,
+      topMonthsFetchOptions,
+    )
+      .then((records) => {
+        if (cancelled) return;
+
+        const topMonthsList = transformOfftakeSnapshot(
+          Object.fromEntries(records.map((record) => [record.id, record])),
+          "",
+          selectedFinanceProgrammes,
+        );
+
+        dataCache.set(topMonthsDataCacheKey, topMonthsList);
+        startTransition(() => {
+          setTopMonthsOfftakeData(topMonthsList);
+        });
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Error fetching top month offtake data:", error);
+      });
 
     // Kick off orders + requisitions fetch in parallel with the offtake listener
     void (async () => {
@@ -1683,7 +1970,7 @@ const SalesReport = () => {
     return () => {
       cancelled = true;
     };
-  }, [accessibleProgrammes, activeProgram, salesDataCacheKey, salesFetchOptions, toast]);
+  }, [accessibleProgrammes, activeProgram, salesDataCacheKey, salesFetchOptions, toast, topMonthsDataCacheKey, topMonthsFetchOptions]);
 
   // ---------------------------------------------------------------------------
   // Callbacks
@@ -1691,7 +1978,13 @@ const SalesReport = () => {
 
   const handleDateRangeChange = useCallback(
     (key: "startDate" | "endDate", value: string) => {
-      setDateRange((prev) => ({ ...prev, [key]: value }));
+      setDateRange((prev) => {
+        if (key === "startDate" && value) {
+          const currentMonth = getCurrentMonthDates();
+          return { ...prev, startDate: value, endDate: currentMonth.endDate };
+        }
+        return { ...prev, [key]: value };
+      });
     },
     [],
   );
@@ -1758,15 +2051,15 @@ const SalesReport = () => {
     [currentYear, selectedYear],
   );
 
-  /**
-   * Clear date filters so the charts can compare all available years
-   * while keeping the current programme selection intact.
-   */
   const clearFilters = useCallback(() => {
     setSelectedYear(ALL_YEARS_OPTION);
     setDateRange({ startDate: "", endDate: "" });
     setTimeFrame("yearly");
-  }, []);
+    setPendingDateKey(null);
+    if (accessibleProgrammes.length > 1 && activeProgram !== ALL_PROGRAMMES_VALUE) {
+      setActiveProgram(ALL_PROGRAMMES_VALUE);
+    }
+  }, [accessibleProgrammes.length, activeProgram, setActiveProgram]);
 
   const handleProgramChange = useCallback((program: string) => {
     setActiveProgram(program);
@@ -1897,6 +2190,47 @@ const SalesReport = () => {
   const hasMultipleRequisitionYears = requisitionTrendSeries.length > 1;
 
   // ---------------------------------------------------------------------------
+  // Report summary – every headline metric shown in FULL (never millified),
+  // grouped into logical sections, with metrics still at zero pushed to the
+  // bottom of each section.
+  // ---------------------------------------------------------------------------
+
+  const formatFullValue = useCallback((val?: number | null) => {
+    const num = Number(val);
+    if (!Number.isFinite(num)) return "0";
+    const rounded = Math.round(num * 100) / 100;
+    return rounded.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  }, []);
+
+  const summaryGroups = useMemo<SummaryGroup[]>(() => {
+    // Only the metrics that are shown millified elsewhere (in the StatsCards
+    // above) are repeated here — but in FULL, unmillified form.
+    const purchaseItems: SummaryItem[] = [
+      { label: "Total Animals Purchased", value: stats.totalAnimals },
+      { label: "Total Purchase Cost", value: stats.totalPurchaseCost, prefix: "KES " },
+      { label: "Total Live Weight", value: stats.totalLiveWeight, suffix: " kg" },
+    ];
+
+    const financialItems: SummaryItem[] = [
+      { label: "Total Revenue", value: stats.totalRevenue, prefix: "KES " },
+      { label: "Total Expenses", value: stats.expenses, prefix: "KES " },
+      { label: "Net Profit", value: stats.netProfit, prefix: "KES " },
+    ];
+
+    const orderRequisitionItems: SummaryItem[] = [
+      { label: "Total Goat Orders Placed", value: stats.totalGoatOrdersPlaced },
+      { label: "Total Goats Purchased", value: stats.totalGoatsPurchasedFromOrders },
+      { label: "Expenses In Requisitions", value: stats.requisitionExpenses, prefix: "KES " },
+    ];
+
+    return [
+      { title: "Purchases", items: sortZeroLast(purchaseItems) },
+      { title: "Financials", items: sortZeroLast(financialItems) },
+      { title: "Orders & Requisitions", items: sortZeroLast(orderRequisitionItems) },
+    ];
+  }, [stats]);
+
+  // ---------------------------------------------------------------------------
   // Loading state
   // ---------------------------------------------------------------------------
 
@@ -1919,7 +2253,7 @@ const SalesReport = () => {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="min-h-screen bg-slate-50/80 p-4 md:p-6 lg:p-8 pb-20">
+    <div className="min-h-screen bg-slate-50/80 p-2 md:p-4 lg:p-6">
       <div className="max-w-7xl mx-auto space-y-8">
         {/* ---------------------------------------------------------------- */}
         {/* Header Section                                                    */}
@@ -2137,22 +2471,6 @@ const SalesReport = () => {
             </CardContent>
           </Card>
 
-          {/* Info strip */}
-          <div className="grid gap-2 sm:grid-cols-3 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-700">
-            <p>
-              <span className="font-semibold">Price/Kg:</span>{" "}
-              {formatCurrency(stats.pricePerKg)} (carcass)
-            </p>
-            <p>
-              <span className="font-semibold">Carcass Weight:</span>{" "}
-              {millify(stats.totalCarcassWeight)} kg
-            </p>
-            <p>
-              <span className="font-semibold">Expenses:</span>{" "}
-              {formatCurrency(stats.expenses)}
-            </p>
-          </div>
-
           {filteredCount === 0 && (
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
               No offtake records matched the current programme and date range.
@@ -2197,64 +2515,33 @@ const SalesReport = () => {
           </div>
 
           <div className="grid gap-6 md:grid-cols-2">
-            {/* Doughnut – Gender */}
-            <Card className="border-0 shadow-sm bg-white rounded-2xl">
-              <CardHeader className="pb-4 pt-6 px-6">
-                <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                  <Users className="h-4 w-4 text-orange-500" />
-                  Farmers Participating In Offtake
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="px-6 pb-6">
-                <div className="h-[280px] w-full relative flex justify-center items-center">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={genderData}
-                        cx="50%"
-                        cy="50%"
-                        innerRadius={60}
-                        outerRadius={90}
-                        paddingAngle={5}
-                        dataKey="value"
-                      >
-                        <Cell fill={COLORS.darkBlue} name="Male" />
-                        <Cell fill={COLORS.orange} name="Female" />
-                        <RechartsLabel
-                          content={renderCenterLabel}
-                          position="center"
-                        />
-                      </Pie>
-                      <Tooltip contentStyle={TOOLTIP_STYLE} />
-                      <Legend
-                        verticalAlign="bottom"
-                        height={36}
-                        iconType="circle"
-                        formatter={(value: string) => (
-                          <span className="text-xs text-gray-600 font-medium capitalize">
-                            {value}
-                          </span>
-                        )}
-                      />
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none mt-3">
-                    <span className="text-2xl font-bold text-gray-800">
-                      {filteredCount}
-                    </span>
-                  </div>
-                </div>
+            {/* Doughnut – Gender (navy blue / orange) */}
+            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+              <SectionCardHeader
+                icon={Users}
+                title="Farmers Participating In Offtake"
+                subtitle="Gender breakdown of beneficiaries for the selected period"
+                tint="blue"
+              />
+              <CardContent className="px-4 pb-6 sm:px-6">
+                <DoughnutBreakdown
+                  data={genderDoughnutData}
+                  total={genderDoughnutTotal}
+                  totalLabel="Farmers"
+                  formatValue={formatNumber}
+                  emptyMessage="No gender data available"
+                />
               </CardContent>
             </Card>
 
             {/* Top 3 Months */}
-            <Card className="border-0 shadow-sm bg-white rounded-2xl flex flex-col">
-              <CardHeader className="pb-4 pt-6 px-6">
-                <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                  <Zap className="h-4 w-4 text-yellow-500" />
-                  Top Performing Months
-                </CardTitle>
-              </CardHeader>
+            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl flex flex-col">
+              <SectionCardHeader
+                icon={Zap}
+                title="Top Performing Months"
+                subtitle="Highest volume months by animals purchased"
+                tint="yellow"
+              />
               <CardContent className="flex-1 px-6 pb-6 flex flex-col justify-center">
                 {top3Months.length > 0 ? (
                   <div className="space-y-4">
@@ -2307,15 +2594,15 @@ const SalesReport = () => {
 
           <div className="grid gap-6 md:grid-cols-2">
             {/* Curved Area Chart – Goats Per County */}
-            <Card className="border-0 shadow-sm bg-white rounded-2xl">
-              <CardHeader className="pb-4 pt-6 px-6">
-                <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                  <MapPin className="h-4 w-4 text-teal-500" />
-                  Goats Purchased Per County
-                </CardTitle>
-              </CardHeader>
+            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+              <SectionCardHeader
+                icon={MapPin}
+                title="Goats Purchased Per County"
+                subtitle="Distribution of goat purchases across counties"
+                tint="teal"
+              />
               <CardContent className="px-6 pb-6">
-                <div className="h-[280px] w-full">
+                <div className="h-[300px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart
                       data={countyData}
@@ -2382,15 +2669,15 @@ const SalesReport = () => {
             </Card>
 
             {/* Top Farmers */}
-            <Card className="border-0 shadow-sm bg-white rounded-2xl flex flex-col">
-              <CardHeader className="pb-4 pt-6 px-6">
-                <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                  <Award className="h-4 w-4 text-purple-500" />
-                  Top Offtake Beneficiaries
-                </CardTitle>
-              </CardHeader>
+            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl flex flex-col">
+              <SectionCardHeader
+                icon={Award}
+                title="Top Offtake Beneficiaries"
+                subtitle="Farmers with the highest purchase volume"
+                tint="purple"
+              />
               <CardContent className="flex-1 px-6 pb-6">
-                <div className="space-y-3 h-[280px] overflow-y-auto pr-2 custom-scrollbar">
+                <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
                   {topFarmers.length > 0 ? (
                     topFarmers.map((farmer, idx) => (
                       <div
@@ -2491,13 +2778,13 @@ const SalesReport = () => {
           </div>
 
           {/* Monthly Purchase Trend */}
-          <Card className="border-0 shadow-sm bg-white rounded-2xl">
-            <CardHeader className="pb-4 pt-6 px-6">
-              <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                <TrendingUp className="h-4 w-4 text-blue-600" />
-                Monthly Purchase Trend
-              </CardTitle>
-            </CardHeader>
+          <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+            <SectionCardHeader
+              icon={TrendingUp}
+              title="Monthly Purchase Trend"
+              subtitle="Animals purchased month over month"
+              tint="blue"
+            />
             <CardContent className="px-6 pb-6">
               <ResponsiveContainer width="100%" height={380}>
                 <AreaChart data={monthlyTrend}>
@@ -2634,58 +2921,54 @@ const SalesReport = () => {
               title="Total Goats Purchased"
               value={millify(stats.totalGoatsPurchasedFromOrders)}
               icon={Beef}
-              subText="Summed from the goats bought values used on the Orders page"
+              subText=""
               color="teal"
             />
             <StatsCard
               title="Expenses In Requisitions"
               value={millify(stats.requisitionExpenses)}
               icon={DollarSign}
-              subText={`${formatNumber(stats.totalRequisitions)} requisitions in the selected range`}
-              subLines={[
-                `${formatNumber(stats.completedRequisitions)} marked complete`,
-                `Amount: ${formatCurrency(stats.completedRequisitionAmount)}`,
-              ]}
+              subText={`${formatNumber(stats.totalRequisitions)} requisitions`}
+             
               color="orange"
             />
           </div>
 
-          {/* Monthly Requisition Trend */}
-          <Card className="border-0 shadow-sm bg-white rounded-2xl">
-            <CardHeader className="pb-4 pt-6 px-6">
-              <CardTitle className="text-sm font-bold flex items-center gap-2 text-gray-800">
-                <TrendingUp className="h-4 w-4 text-blue-600" />
-                Monthly Requisition Trend
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="px-6 pb-6">
-              <ResponsiveContainer width="100%" height={380}>
-                <AreaChart data={requisitionTrend}>
-                  <defs>
-                    {hasLegacyRequisitionTrend ? (
-                      <linearGradient
-                        id="colorRequisitionTrend"
-                        x1="0"
-                        y1="0"
-                        x2="0"
-                        y2="1"
-                      >
-                        <stop
-                          offset="5%"
-                          stopColor={COLORS.orange}
-                          stopOpacity={0.24}
-                        />
-                        <stop
-                          offset="95%"
-                          stopColor={COLORS.orange}
-                          stopOpacity={0}
-                        />
-                      </linearGradient>
-                    ) : (
-                      requisitionTrendSeries.map((series) => (
+          <div className="grid gap-6 xl:grid-cols-2">
+            {/* Doughnut – Orders vs Purchased (maroon / yellow) */}
+            <Card className="border border-slate-100 bg-white shadow-sm rounded-2xl">
+              <SectionCardHeader
+                icon={Package}
+                title="Orders vs Goats Purchased"
+                subtitle="Total ordered goats compared with goats bought for the selected period"
+                tint="maroon"
+              />
+              <CardContent className="px-4 pb-6 sm:px-6">
+                <DoughnutBreakdown
+                  data={orderPurchaseDoughnutData}
+                  total={orderPurchaseDoughnutTotal}
+                  totalLabel="Goats"
+                  valueSuffix=" goats"
+                  formatValue={formatNumber}
+                  emptyMessage="No order purchase comparison data available"
+                />
+              </CardContent>
+            </Card>
+
+            <Card className="border border-slate-100 bg-white shadow-sm rounded-2xl">
+              <SectionCardHeader
+                icon={TrendingUp}
+                title="Monthly Requisition Trend"
+                subtitle="Requisition movement across the selected reporting window"
+                tint="orange"
+              />
+              <CardContent className="px-4 pb-6 sm:px-6">
+                <ResponsiveContainer width="100%" height={360}>
+                  <AreaChart data={requisitionTrend} margin={{ top: 12, right: 8, bottom: 8, left: 0 }}>
+                    <defs>
+                      {hasLegacyRequisitionTrend ? (
                         <linearGradient
-                          key={series.key}
-                          id={`requisitionTrendGradient-${series.key}`}
+                          id="colorRequisitionTrend"
                           x1="0"
                           y1="0"
                           x2="0"
@@ -2693,80 +2976,164 @@ const SalesReport = () => {
                         >
                           <stop
                             offset="5%"
-                            stopColor={series.color}
-                            stopOpacity={0.22}
+                            stopColor={COLORS.orange}
+                            stopOpacity={0.24}
                           />
                           <stop
                             offset="95%"
-                            stopColor={series.color}
+                            stopColor={COLORS.orange}
                             stopOpacity={0}
                           />
                         </linearGradient>
+                      ) : (
+                        requisitionTrendSeries.map((series) => (
+                          <linearGradient
+                            key={series.key}
+                            id={`requisitionTrendGradient-${series.key}`}
+                            x1="0"
+                            y1="0"
+                            x2="0"
+                            y2="1"
+                          >
+                            <stop
+                              offset="5%"
+                              stopColor={series.color}
+                              stopOpacity={0.22}
+                            />
+                            <stop
+                              offset="95%"
+                              stopColor={series.color}
+                              stopOpacity={0}
+                            />
+                          </linearGradient>
+                        ))
+                      )}
+                    </defs>
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="#f1f5f9"
+                      vertical={false}
+                    />
+                    <XAxis
+                      dataKey="month"
+                      tick={{ fontSize: 10, fill: "#64748b" }}
+                      axisLine={false}
+                      tickLine={false}
+                      interval={0}
+                      minTickGap={0}
+                      height={48}
+                      tickMargin={10}
+                      angle={-30}
+                      textAnchor="end"
+                    />
+                    <YAxis
+                      tick={{ fontSize: 12, fill: "#64748b" }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    {!hasLegacyRequisitionTrend && hasMultipleRequisitionYears && (
+                      <Legend />
+                    )}
+                    <Tooltip
+                      contentStyle={TOOLTIP_STYLE}
+                      formatter={(value: number | string, name: string) => [
+                        `${formatNumber(Number(value))} requisitions`,
+                        name,
+                      ]}
+                    />
+                    {hasLegacyRequisitionTrend ? (
+                      <Area
+                        type="monotone"
+                        dataKey="count"
+                        stroke={COLORS.orange}
+                        strokeWidth={2.4}
+                        fillOpacity={1}
+                        fill="url(#colorRequisitionTrend)"
+                        name="Requisitions"
+                      />
+                    ) : (
+                      requisitionTrendSeries.map((series) => (
+                        <Area
+                          key={series.key}
+                          type="monotone"
+                          dataKey={series.key}
+                          stroke={series.color}
+                          strokeWidth={2.4}
+                          fillOpacity={hasMultipleRequisitionYears ? 0 : 1}
+                          fill={
+                            hasMultipleRequisitionYears
+                              ? "transparent"
+                              : `url(#requisitionTrendGradient-${series.key})`
+                          }
+                          name={series.label}
+                        />
                       ))
                     )}
-                  </defs>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="#f1f5f9"
-                    vertical={false}
-                  />
-                  <XAxis
-                    dataKey="month"
-                    tick={{ fontSize: 10, fill: "#64748b" }}
-                    axisLine={false}
-                    tickLine={false}
-                    interval={0}
-                    minTickGap={0}
-                    height={54}
-                    tickMargin={12}
-                    angle={-35}
-                    textAnchor="end"
-                  />
-                  <YAxis
-                    tick={{ fontSize: 12, fill: "#64748b" }}
-                    axisLine={false}
-                    tickLine={false}
-                  />
-                  {!hasLegacyRequisitionTrend && hasMultipleRequisitionYears && (
-                    <Legend />
-                  )}
-                  <Tooltip
-                    contentStyle={TOOLTIP_STYLE}
-                    formatter={(value: number | string, name: string) => [
-                      `${formatNumber(Number(value))} Requisitions`,
-                      name,
-                    ]}
-                  />
-                  {hasLegacyRequisitionTrend ? (
-                    <Area
-                      type="monotone"
-                      dataKey="count"
-                      stroke={COLORS.orange}
-                      strokeWidth={2}
-                      fillOpacity={1}
-                      fill="url(#colorRequisitionTrend)"
-                      name="Requisitions"
-                    />
-                  ) : (
-                    requisitionTrendSeries.map((series) => (
-                      <Area
-                        key={series.key}
-                        type="monotone"
-                        dataKey={series.key}
-                        stroke={series.color}
-                        strokeWidth={2.4}
-                        fillOpacity={hasMultipleRequisitionYears ? 0 : 1}
-                        fill={
-                          hasMultipleRequisitionYears
-                            ? "transparent"
-                            : `url(#requisitionTrendGradient-${series.key})`
-                        }
-                        name={series.label}
-                      />
-                    ))
-                  )}
-                </AreaChart>
-              </ResponsiveContainer>
+                  </AreaChart>
+                </ResponsiveContainer>
+              </CardContent>
+            </Card>
+          </div>
+        </section>
+
+        {/* ================================================================= */}
+        {/* SECTION 4: REPORT SUMMARY                                          */}
+        {/* Every metric shown in FULL (not millified), grouped into logical   */}
+        {/* sections with small/clean typography. Zero-value metrics are      */}
+        {/* pushed to the bottom of each section.                             */}
+        {/* ================================================================= */}
+        <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
+          <Card className="border-0 shadow-lg bg-gradient-to-br from-blue-50 via-white to-slate-50 rounded-2xl overflow-hidden">
+            <CardContent className="p-5 md:p-6">
+              <div className="flex items-center gap-3 pb-4 mb-5 border-b border-blue-100">
+                <div className="flex items-center justify-center w-11 h-11 rounded-full bg-blue-600 shadow-md shrink-0">
+                  <ClipboardList className="h-5 w-5 text-white" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold tracking-wider text-blue-700 uppercase">
+                    Report Summary
+                  </p>
+                 
+                </div>
+              </div>
+
+              <div className="space-y-5">
+                {summaryGroups.map((group) => (
+                  <div key={group.title}>
+                    <p className="text-[9.5px] font-medium uppercase tracking-wider text-blue-700/80 mb-2">
+                      {group.title}
+                    </p>
+                    <div className="grid grid-cols-2 grid-cols-3 gap-1.5">
+                      {group.items.map((item) => {
+                        const isZero = Number(item.value) === 0;
+                        return (
+                          <div
+                            key={item.label}
+                            className={`rounded-md border px-2.5 py-1.5 transition-all ${
+                              isZero
+                                ? "border-slate-100 bg-slate-50/60"
+                                : "border-slate-100 bg-white/80 hover:shadow-sm hover:border-blue-100"
+                            }`}
+                          >
+                            <p className="text-[8px] font-normal text-slate-800 uppercase tracking-wide leading-snug">
+                              {item.label}
+                            </p>
+                            <p
+                              className={`text-[11.5px] font-medium mt-0.5 leading-snug tracking-tight ${
+                                isZero ? "text-slate-400" : "text-gray-800"
+                              }`}
+                            >
+                              {item.prefix ?? ""}
+                              {formatFullValue(item.value)}
+                              {item.suffix ?? ""}
+                            </p>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </CardContent>
           </Card>
         </section>

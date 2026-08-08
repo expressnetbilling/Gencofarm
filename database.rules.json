@@ -79,7 +79,7 @@
     "offtakes": {
       ".read": "auth != null",
       ".write": "auth != null",
-      ".indexOn": ["programme", "Programme", "createdAt", "rawTimestamp", "date"],
+      ".indexOn": ["programme", "Programme", "createdAt", "created_at", "completedAt", "completed_at", "timestamp", "rawTimestamp", "date", "Date", "purchaseDate", "purchase_date"],
       "$recordId": {
         ".read": "auth != null",
         ".write": "auth != null"

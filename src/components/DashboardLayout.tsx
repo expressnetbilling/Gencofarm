@@ -50,7 +50,7 @@ const DashboardLayout = () => {
         <DashboardSidebar />
 
         <div className="flex-1 flex flex-col w-full min-w-0">
-          <header className="border-b bg-card/50 bg-white sticky top-0 z-10 h-16">
+          <header className="border-b bg-card/50 bg-white sticky top-0 z-10 h-[75px]">
             <div className="w-full px-4 sm:px-6 lg:px-8 h-full flex items-center justify-between">
 
               <div className="flex items-center gap-2 sm:gap-3">
@@ -58,9 +58,7 @@ const DashboardLayout = () => {
                 <p className="text-sm text-muted-foreground truncate">
                   {userName || user?.email || "User"}
                 </p>
-                <span className="hidden sm:inline-flex text-xs px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800 font-semibold whitespace-nowrap">
-                  {getCurrentMonthLabel()}
-                </span>
+               
               </div>
 
               <div className="flex items-center gap-2 sm:gap-3">
