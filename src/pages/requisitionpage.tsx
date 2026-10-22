@@ -2333,7 +2333,7 @@ const RequisitionsPage = () => {
        {(!userRole || !userHasHrLikeViewRights) && ( <div className="flex flex-col gap-4 text-sm">
              <div className="flex flex-col xl:flex-row xl:justify-between xl:items-end gap-4 w-full">
        <div className="w-full xl:w-auto flex flex-wrap items-center gap-3">
-          <h2 className="text-md font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h2 className="text-md font-bold bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
             Requisitions
           </h2>
         </div>
@@ -2384,7 +2384,7 @@ const RequisitionsPage = () => {
             </div>
            )}
            { !userHasHrLikeViewRights && userRole !== 'admin' && (
-             <Button onClick={() => {}} disabled={exportLoading} className="bg-gradient-to-r from-blue-800 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md text-xs h-9 px-6 w-full xl:w-auto">
+             <Button onClick={() => {}} disabled={exportLoading} className="bg-green-600 hover:bg-green-700 text-white shadow-md text-xs h-9 px-6 w-full xl:w-auto">
                 <Download className="h-4 w-4 mr-2" /> Export ({filteredRequisitions.length})
               </Button>
            )}
@@ -2399,7 +2399,7 @@ const RequisitionsPage = () => {
       <div className="flex flex-col xl:flex-row xl:justify-between xl:items-end gap-4 w-full">
         
          <div className="w-full xl:w-auto flex flex-wrap items-center gap-3">
-            <h2 className="text-md font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+            <h2 className="text-md font-bold bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
             Requisitions
           </h2>
             
@@ -2443,7 +2443,7 @@ const RequisitionsPage = () => {
           
         <div className="flex flex-wrap gap-2 w-full xl:w-auto mt-2 xl:mt-0 justify-end">
            { !userHasHrLikeViewRights && (
-             <Button onClick={() => {}} disabled={exportLoading} className="bg-gradient-to-r from-blue-800 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md text-xs h-9 px-6 w-full xl:w-auto">
+             <Button onClick={() => {}} disabled={exportLoading} className="bg-green-600 hover:bg-green-700 text-white shadow-md text-xs h-9 px-6 w-full xl:w-auto">
                 <Download className="h-4 w-4 mr-2" /> Export ({filteredRequisitions.length})
               </Button>
            )}
@@ -2512,10 +2512,10 @@ const RequisitionsPage = () => {
       </Card>
 
       {selectedRecords.length > 0 && (
-        <Card className="shadow-lg border border-blue-100 bg-blue-50/40">
+        <Card className="shadow-lg border border-green-100 bg-green-50/40">
           <CardContent className="pt-4 pb-4 space-y-3">
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="text-sm font-medium text-blue-900">
+              <div className="text-sm font-medium text-green-900">
                 {selectedRecords.length} requisition{selectedRecords.length === 1 ? "" : "s"} selected
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -2540,7 +2540,7 @@ const RequisitionsPage = () => {
                         size="sm"
                         variant="outline"
                         disabled={isBulkProcessing}
-                        className="border-indigo-300 text-indigo-700 hover:bg-indigo-50"
+                        className="border-green-300 text-green-700 hover:bg-green-50"
                       >
                         HR Actions
                         <ChevronDown className="h-4 w-4 ml-2" />
@@ -2583,7 +2583,7 @@ const RequisitionsPage = () => {
                     size="sm"
                     onClick={handleBulkCompleteTransaction}
                     disabled={isBulkProcessing}
-                    className="bg-blue-700 hover:bg-blue-800"
+                    className="bg-green-700 hover:bg-green-800"
                   >
                     <CheckCircle className="h-4 w-4 mr-2" />
                     Complete Transaction
@@ -2632,23 +2632,23 @@ const RequisitionsPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-50 text-xs">
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                    <tr className="bg-green-100 text-xs text-green-900">
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         <Checkbox checked={allCurrentPageSelected} onCheckedChange={toggleSelectAllCurrentPage} />
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Date</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Type</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Field Officer</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Purpose</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Amount</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Transacted By</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Status</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700 text-right">Actions</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Date</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Type</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Field Officer</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Purpose</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Amount</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Transacted By</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Status</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {currentPageRecords.map((record) => (
-                      <tr key={record.id} className="border-b hover:bg-blue-50 transition-colors group">
+                      <tr key={record.id} className="border-b hover:bg-green-50 transition-colors group">
                         <td className="py-2 px-3">
                           <Checkbox
                             checked={selectedRecords.includes(record.id)}
@@ -2696,7 +2696,7 @@ const RequisitionsPage = () => {
                                        record.status === "approved" ?
                                          "bg-green-100 text-green-800 hover:bg-green-100" :
                                          record.status === "complete" ?
-                                           "bg-blue-100 text-blue-800 hover:bg-blue-100" :
+                                           "bg-green-100 text-green-800 hover:bg-green-100" :
                                            ""
                                    }
                                 >
@@ -2708,7 +2708,7 @@ const RequisitionsPage = () => {
                                   <span className="text-[10px] text-red-700 font-medium">Rejected</span>
                                 )}
                                {record.status === "approved" && !!record.transactionCompletedBy && (
-                                 <span className="text-[10px] text-blue-700 font-medium">Transaction complete</span>
+                                 <span className="text-[10px] text-green-700 font-medium">Transaction complete</span>
                                )}
                                {getRequisitionImages(record.requisitionUrl).length > 0 && (
                                  <span className="text-[10px] text-emerald-700 font-medium">Images uploaded</span>
@@ -3028,7 +3028,7 @@ const RequisitionsPage = () => {
 
         
               {canCompleteTransaction && canProceedAfterApproval(viewingRecord) && !viewingRecord.transactionCompletedBy && (
-                <Button onClick={handleCompleteTransaction} className="bg-blue-800 hover:bg-blue-900 flex-1 sm:flex-none">
+                <Button onClick={handleCompleteTransaction} className="bg-green-700 hover:bg-green-800 flex-1 sm:flex-none">
                   <CheckCircle className="h-4 w-4 mr-2" /> Complete Transaction
                 </Button>
               )}

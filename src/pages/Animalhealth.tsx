@@ -12,15 +12,14 @@ import {
   isAdmin,
 } from "@/contexts/authhelper";
 import { includesProgramme, normalizeProgramme as normalizeProg, resolveAccessibleProgrammes } from "@/lib/programme-access";
-import { 
-  Users, 
-  Plus, 
+import {
+  Users,
+  Plus,
   Eye,
   Edit,
   Trash2,
   X,
   Search,
-  Syringe,
   Activity,
   TrendingUp,
   TrendingDown,
@@ -30,6 +29,8 @@ import {
   Upload,
   MapPin,
   RotateCcw,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -37,10 +38,10 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import * as XLSX from 'xlsx';
-import { readCachedValue, writeCachedValue, cacheKey } from "@/lib/data-cache"; 
+import { readCachedValue, writeCachedValue, cacheKey } from "@/lib/data-cache";
 
 // ----------------------------------------------
-// Utility: Format large numbers (e.g. 1,200 ? 1.2K, 1,500,000 ? 1.5M)
+// Utility: Format large numbers (e.g. 1,200 -> 1.2K, 1,500,000 -> 1.5M)
 // ----------------------------------------------
 const formatNumber = (num: number): string => {
   if (num == null || !Number.isFinite(num)) return "0";
@@ -74,7 +75,7 @@ interface Beneficiary {
 }
 
 interface Issue {
-  id: string; 
+  id: string;
   name: string;
   raisedBy: string;
   county: string;
@@ -124,6 +125,13 @@ const safeParseDate = (value: string | number | undefined | null): number => {
   return Number.isFinite(ts) ? ts : 0;
 };
 
+// End-of-day timestamp for a date-only string, used for inclusive "end date" filtering.
+const safeParseDateEnd = (value: string | number | undefined | null): number => {
+  const start = safeParseDate(value);
+  if (!start) return 0;
+  return start + (24 * 60 * 60 * 1000 - 1);
+};
+
 const getAnimalHealthTimestamp = (
   activity: Partial<AnimalHealthActivity> | null | undefined
 ): number => {
@@ -152,8 +160,12 @@ const VACCINE_OPTIONS = [
   "Rift Valley Fever", "Brucellosis", "Foot and Mouth Disease"
 ];
 
-type ProgrammeView = "ALL" | "KPMD" | "RANGE" | "KPMD 2";
+// Programme view is intentionally a plain string (not a fixed union) because the
+// list of accessible programmes is dynamic and comes from the auth context.
+type ProgrammeView = string;
+const ALL_PROGRAMMES: ProgrammeView = "ALL";
 const FARMERS_PER_PAGE = 20;
+const RECORDS_PER_PAGE = 15;
 
 // Kenya Areas API
 interface KenyaAreasResponse { [county: string]: { [subcounty: string]: string[] }; }
@@ -237,8 +249,21 @@ const mergeFarmerRecords = (
 };
 
 const getActivityVaccines = (activity: AnimalHealthActivity): Vaccine[] => activity.vaccines || [];
-const getActivityTotalDoses = (activity: AnimalHealthActivity): number => 
+const getActivityTotalDoses = (activity: AnimalHealthActivity): number =>
   (activity.vaccines || []).reduce((sum, v) => sum + (Number(v.doses) || 0), 0);
+
+// A single animal can receive more than one vaccine (e.g. PPR + Anthrax), so the
+// number of vaccination shoats administered is NOT the same as the number of
+// distinct animals vaccinated. Animal counts must come from the recorded
+// beneficiaries' goats/sheep tallies instead.
+const getActivityAnimalCounts = (activity: AnimalHealthActivity): { goats: number; sheep: number } =>
+  (activity.beneficiaries || []).reduce(
+    (totals, b) => ({
+      goats: totals.goats + (Number(b.goats) || 0),
+      sheep: totals.sheep + (Number(b.sheep) || 0),
+    }),
+    { goats: 0, sheep: 0 },
+  );
 
 const formatDate = (d: string): string => {
   if (!d) return "No date";
@@ -265,13 +290,13 @@ const AnimalHealthPage = () => {
   const [viewingActivity, setViewingActivity] = useState<AnimalHealthActivity | null>(null);
   const [editingActivity, setEditingActivity] = useState<AnimalHealthActivity | null>(null);
   const [viewFarmersPage, setViewFarmersPage] = useState(1);
-  
+
   const [fieldOfficerForm, setFieldOfficerForm] = useState({ name: "", role: "" });
   const [fieldOfficers, setFieldOfficers] = useState<FieldOfficer[]>([]);
-  
+
   const [selectedVaccines, setSelectedVaccines] = useState<string[]>([]);
   const [totalDoses, setTotalDoses] = useState<string>("");
-  
+
   const [beneficiaries, setBeneficiaries] = useState<Beneficiary[]>([]);
   const [beneficiaryForm, setBeneficiaryForm] = useState({
     name: "",
@@ -280,11 +305,11 @@ const AnimalHealthPage = () => {
     goats: "",
     sheep: "",
   });
-  
-  // FIX: Track whether user manually edited beneficiary counts so we don't
+
+  // Track whether user manually edited beneficiary counts so we don't
   // overwrite their input when the beneficiaries array changes from an upload.
   const manualCountOverride = useRef(false);
-  
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -292,14 +317,14 @@ const AnimalHealthPage = () => {
   const [issueForm, setIssueForm] = useState<Partial<Issue>>({
     name: "", raisedBy: "", description: "", status: "not responded",
   });
-  
+
   const [showIssueForm, setShowIssueForm] = useState(false);
 
   const [activityForm, setActivityForm] = useState({
     date: "", county: "", subcounty: "", location: "",
     malebeneficiaries: "", femalebeneficiaries: "", comment: "", programme: "",
   });
-  
+
   const { user, userRole, userAttribute, allowedProgrammes } = useAuth();
   const { toast } = useToast();
 
@@ -338,12 +363,13 @@ const AnimalHealthPage = () => {
   const currentMonth = useMemo(getCurrentMonthDates, []);
   const [startDate, setStartDate] = useState(currentMonth.startDate);
   const [endDate, setEndDate] = useState(currentMonth.endDate);
-  // CHANGED: default programme view now shows ALL programmes by default
-  const [programmeView, setProgrammeView] = useState<ProgrammeView>("ALL");
+  // Default programme view shows ALL programmes by default
+  const [programmeView, setProgrammeView] = useState<ProgrammeView>(ALL_PROGRAMMES);
   const [isVaccinationReportDialogOpen, setIsVaccinationReportDialogOpen] = useState(false);
-  const [vaccinationReportProgramme, setVaccinationReportProgramme] = useState<ProgrammeView>("ALL");
+  const [vaccinationReportProgramme, setVaccinationReportProgramme] = useState<ProgrammeView>(ALL_PROGRAMMES);
   const [selectedActivities, setSelectedActivities] = useState<string[]>([]);
   const [isSelecting, setIsSelecting] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
 
   // -- Auth / access --
   const userIsAdmin = useMemo(() => isAdmin(userRole), [userRole]);
@@ -359,7 +385,7 @@ const AnimalHealthPage = () => {
   const hasProgrammeAccess = userCanReadAllAnimalHealthProgrammes || accessibleProgrammes.length > 0;
   const defaultActivityProgramme = accessibleProgrammes[0] || "";
   const defaultProgrammeView = useMemo<ProgrammeView>(
-    () => (accessibleProgrammes[0] || "KPMD") as Exclude<ProgrammeView, "ALL">,
+    () => accessibleProgrammes[0] || ALL_PROGRAMMES,
     [accessibleProgrammes],
   );
 
@@ -390,7 +416,7 @@ const AnimalHealthPage = () => {
   useEffect(() => {
     setProgrammeView((prev) => {
       if (userCanReadAllAnimalHealthProgrammes) {
-        return prev === "ALL" || includesProgramme(accessibleProgrammes, prev) ? prev : defaultProgrammeView;
+        return prev === ALL_PROGRAMMES || includesProgramme(accessibleProgrammes, prev) ? prev : defaultProgrammeView;
       }
       return includesProgramme(accessibleProgrammes, prev) ? prev : defaultProgrammeView;
     });
@@ -398,7 +424,7 @@ const AnimalHealthPage = () => {
 
   useEffect(() => {
     setVaccinationReportProgramme((prev) => {
-      if (userCanReadAllAnimalHealthProgrammes && prev === "ALL") return prev;
+      if (userCanReadAllAnimalHealthProgrammes && prev === ALL_PROGRAMMES) return prev;
       return includesProgramme(accessibleProgrammes, prev) ? prev : defaultProgrammeView;
     });
   }, [accessibleProgrammes, defaultProgrammeView, userCanReadAllAnimalHealthProgrammes]);
@@ -438,7 +464,7 @@ const AnimalHealthPage = () => {
             const rawBeneficiaries = toFarmerArray(item.beneficiaries);
             const rawFarmers = toFarmerArray(item.farmers);
             const beneficiariesForView = mergeFarmerRecords(rawBeneficiaries, rawFarmers, key);
-            
+
             if (item.vaccines && Array.isArray(item.vaccines)) {
               vaccines = item.vaccines
                 .map((v: any) => ({
@@ -449,7 +475,7 @@ const AnimalHealthPage = () => {
             } else if (item.vaccinetype) {
               vaccines = [{ type: item.vaccinetype, doses: Number(item.number_doses) || 0 }];
             }
-            
+
             return {
               id: key,
               date: item.date || "",
@@ -469,7 +495,7 @@ const AnimalHealthPage = () => {
               status: item.status || "completed",
             } as AnimalHealthActivity;
           });
-          
+
           const sorted = sortAnimalHealthByLatest(
             filterActivitiesByProgrammeAccess(
               activitiesData,
@@ -523,6 +549,35 @@ const AnimalHealthPage = () => {
 
   const handleRemoveBeneficiary = (id: string) => {
     setBeneficiaries((prev) => prev.filter((b) => b.id !== id));
+    manualCountOverride.current = false;
+  };
+
+  // Updates a single field on a single beneficiary row in place (used by the
+  // editable farmers table in the Edit dialog). Numeric fields are parsed and
+  // gender is constrained to the allowed union.
+  const handleUpdateBeneficiary = (
+    id: string,
+    field: "name" | "gender" | "nationalId" | "goats" | "sheep",
+    value: string,
+  ) => {
+    setBeneficiaries((prev) =>
+      prev.map((b) => {
+        if (b.id !== id) return b;
+        switch (field) {
+          case "goats":
+            return { ...b, goats: parseInt(value) || 0 };
+          case "sheep":
+            return { ...b, sheep: parseInt(value) || 0 };
+          case "gender":
+            return { ...b, gender: value === "Female" ? "Female" : "Male" };
+          default:
+            return { ...b, [field]: value };
+        }
+      }),
+    );
+    // A gender edit changes the male/female split, so let the auto-sync
+    // effect recompute it (unless the user has explicitly overridden the
+    // count fields directly).
     manualCountOverride.current = false;
   };
 
@@ -774,18 +829,6 @@ const AnimalHealthPage = () => {
     }
   };
 
-  // -- Selection --
-  const toggleActivitySelection = (activityId: string) => {
-    setSelectedActivities((prev) =>
-      prev.includes(activityId) ? prev.filter((id) => id !== activityId) : [...prev, activityId],
-    );
-  };
-  const selectAllActivities = () => {
-    setSelectedActivities((prev) =>
-      prev.length === displayedActivities.length ? [] : displayedActivities.map((a) => a.id),
-    );
-  };
-
   // -- Dialog openers --
   const openViewDialog = (activity: AnimalHealthActivity) => {
     setViewingActivity(activity);
@@ -806,7 +849,7 @@ const AnimalHealthPage = () => {
   // CALCULATIONS FOR STATS
   // --------------------------------------------
   const statsActivities = useMemo(() => {
-    if (programmeView === "ALL") return activities;
+    if (programmeView === ALL_PROGRAMMES) return activities;
     return activities.filter((a) => a.programme === programmeView);
   }, [activities, programmeView]);
 
@@ -815,22 +858,19 @@ const AnimalHealthPage = () => {
     [statsActivities],
   );
 
-  // Regional coverage: unique counties
-  const regionalCoverage = useMemo(() => {
-    const counties = new Set<string>();
-    statsActivities.forEach((a) => {
-      if (a.county) counties.add(a.county.trim());
+  // Total animals vaccinated = goats + sheep recorded against beneficiaries.
+  // NOTE: this is intentionally distinct from totalDosesAdministered, because a
+  // single animal can receive multiple vaccine shots (e.g. PPR + Anthrax), so
+  // doses administered is not a reliable proxy for the number of animals.
+  const animalTotals = useMemo(() => {
+    let goats = 0;
+    let sheep = 0;
+    statsActivities.forEach((activity) => {
+      const counts = getActivityAnimalCounts(activity);
+      goats += counts.goats;
+      sheep += counts.sheep;
     });
-    return counties.size;
-  }, [statsActivities]);
-
-  // Unique locations (subcounty + location pairs)
-  const uniqueLocations = useMemo(() => {
-    const locs = new Set<string>();
-    statsActivities.forEach((a) => {
-      if (a.location) locs.add(`${a.subcounty?.trim() || ""}-${a.location.trim()}`);
-    });
-    return locs.size;
+    return { goats, sheep, total: goats + sheep };
   }, [statsActivities]);
 
   // Beneficiary Calculations
@@ -847,10 +887,8 @@ const AnimalHealthPage = () => {
     [totalMaleBeneficiaries, totalFemaleBeneficiaries],
   );
 
-  // CHANGED: Vaccination rate now compares total doses administered in the
-  // previous calendar year against the current calendar year, instead of
-  // comparing the last two individual activities (which gave a misleading
-  // picture). Date parsing logic (getAnimalHealthTimestamp) is unchanged.
+  // Vaccination rate compares total doses administered in the previous
+  // calendar year against the current calendar year.
   const vaccinationRate = useMemo(() => {
     const now = new Date();
     const currentYear = now.getFullYear();
@@ -908,47 +946,81 @@ const AnimalHealthPage = () => {
         const matchIssue = (activity.issues || []).some(
           (i) => i.name?.toLowerCase().includes(s) || i.raisedBy?.toLowerCase().includes(s),
         );
-        const aDate = activity.date ? new Date(activity.date) : new Date(0);
-        const matchStart = !startDate || aDate >= new Date(startDate);
-        const matchEnd = !endDate || aDate <= new Date(endDate + "T23:59:59");
+        const activityTs = safeParseDate(activity.date);
+        const matchStart = !startDate || activityTs >= safeParseDate(startDate);
+        const matchEnd = !endDate || activityTs <= safeParseDateEnd(endDate);
         return (matchSearch || matchIssue) && matchStart && matchEnd;
       }),
     [activities, searchTerm, startDate, endDate],
   );
 
-  const activitiesByProgramme = useMemo(
-    () => ({
-      KPMD: filteredActivities.filter((a) => a.programme === "KPMD"),
-      RANGE: filteredActivities.filter((a) => a.programme === "RANGE"),
-      "KPMD 2": filteredActivities.filter((a) => a.programme === "KPMD 2"),
-    }),
-    [filteredActivities],
-  );
+  // Generic per-programme grouping (not hardcoded to specific programme names,
+  // since accessible programmes are dynamic and come from the auth context).
+  const activitiesByProgramme = useMemo(() => {
+    const map: Record<string, AnimalHealthActivity[]> = {};
+    filteredActivities.forEach((activity) => {
+      const key = activity.programme || "Unassigned";
+      if (!map[key]) map[key] = [];
+      map[key].push(activity);
+    });
+    return map;
+  }, [filteredActivities]);
 
   const displayedActivities = useMemo(() => {
-    if (programmeView === "ALL") return filteredActivities;
-    return activitiesByProgramme[programmeView];
+    if (programmeView === ALL_PROGRAMMES) return filteredActivities;
+    return activitiesByProgramme[programmeView] || [];
   }, [activitiesByProgramme, filteredActivities, programmeView]);
 
-  const vaccinationReportRows = useMemo(() => {
-    const reportActivities =
-      vaccinationReportProgramme === "ALL"
-        ? filteredActivities
-        : filteredActivities.filter((activity) => activity.programme === vaccinationReportProgramme);
+ const vaccinationReportRows = useMemo(() => {
+  const reportActivities =
+    vaccinationReportProgramme === ALL_PROGRAMMES
+      ? filteredActivities
+      : filteredActivities.filter((activity) => activity.programme === vaccinationReportProgramme);
 
-    return reportActivities.map((activity) => ({
-      vaccinationDate: formatDate(activity.date),
-      countySubcounty: [activity.county, activity.subcounty].filter(Boolean).join(" / ") || "N/A",
-      site: activity.location || "N/A",
-      vaccinationShots: getActivityTotalDoses(activity),
-    }));
-  }, [filteredActivities, vaccinationReportProgramme]);
+  return reportActivities.map((activity) => ({
+    vaccinationDate: formatDate(activity.date),
+    county: activity.county || "N/A",
+    subcounty: activity.subcounty || "N/A",
+    site: activity.location || "N/A",
+    vaccinationShots: getActivityTotalDoses(activity),
+  }));
+}, [filteredActivities, vaccinationReportProgramme]);
+  // -- Pagination (15 records per page by default) --
+  const totalPages = Math.max(1, Math.ceil(displayedActivities.length / RECORDS_PER_PAGE));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const paginatedActivities = useMemo(
+    () => displayedActivities.slice((safeCurrentPage - 1) * RECORDS_PER_PAGE, safeCurrentPage * RECORDS_PER_PAGE),
+    [displayedActivities, safeCurrentPage],
+  );
+
+  // Reset to page 1 whenever the active filters change so stale pages aren't shown.
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, startDate, endDate, programmeView]);
 
   // Prune selected IDs when they go out of view
   useEffect(() => {
     const visibleIds = new Set(displayedActivities.map((a) => a.id));
     setSelectedActivities((prev) => prev.filter((id) => visibleIds.has(id)));
   }, [displayedActivities]);
+
+  // -- Selection (scoped to the current page, matching the visible checkboxes) --
+  const toggleActivitySelection = (activityId: string) => {
+    setSelectedActivities((prev) =>
+      prev.includes(activityId) ? prev.filter((id) => id !== activityId) : [...prev, activityId],
+    );
+  };
+  const pageActivityIds = useMemo(() => paginatedActivities.map((a) => a.id), [paginatedActivities]);
+  const isPageFullySelected =
+    pageActivityIds.length > 0 && pageActivityIds.every((id) => selectedActivities.includes(id));
+  const selectAllActivities = () => {
+    setSelectedActivities((prev) => {
+      if (isPageFullySelected) {
+        return prev.filter((id) => !pageActivityIds.includes(id));
+      }
+      return Array.from(new Set([...prev, ...pageActivityIds]));
+    });
+  };
 
   // -- Edit dialog --
   const openEditDialog = (activity: AnimalHealthActivity) => {
@@ -973,7 +1045,7 @@ const AnimalHealthPage = () => {
     setIssues(activity.issues || []);
     setBeneficiaries(activity.beneficiaries || []);
     setShowIssueForm(false);
-    manualCountOverride.current = true; // Editing � don't auto-sync until user adds/removes
+    manualCountOverride.current = true; // Editing: don't auto-sync until user adds/removes
     setIsEditDialogOpen(true);
   };
 
@@ -988,8 +1060,7 @@ const AnimalHealthPage = () => {
       const csvData = displayedActivities.map((a) => {
         const vText = getActivityVaccines(a).map((v) => `${v.type}(${v.doses})`).join(";");
         const iText = (a.issues || []).map((i) => `${i.name}(${i.status})`).join(";");
-        const tGoats = (a.beneficiaries || []).reduce((s, b) => s + (b.goats || 0), 0);
-        const tSheep = (a.beneficiaries || []).reduce((s, b) => s + (b.sheep || 0), 0);
+        const { goats: tGoats, sheep: tSheep } = getActivityAnimalCounts(a);
         return [
           formatDate(a.date), a.programme, a.county, a.subcounty, a.location,
           a.malebeneficiaries, a.femalebeneficiaries, tGoats, tSheep,
@@ -1005,7 +1076,7 @@ const AnimalHealthPage = () => {
       const blob = new Blob([csvContent], { type: "text/csv" });
       const link = document.createElement("a");
       link.href = window.URL.createObjectURL(blob);
-      const programmeSuffix = programmeView === "ALL" ? "all-programmes" : programmeView.toLowerCase();
+      const programmeSuffix = programmeView === ALL_PROGRAMMES ? "all-programmes" : programmeView.toLowerCase().replace(/\s+/g, "-");
       link.download = `vaccination-${programmeSuffix}-${new Date().toISOString().split("T")[0]}.csv`;
       link.click();
       window.URL.revokeObjectURL(link.href);
@@ -1015,28 +1086,30 @@ const AnimalHealthPage = () => {
     }
   };
 
-  const downloadVaccinationReport = () => {
-    try {
-      const headers = ["Vaccination Date", "County & Subcounty", "Site", "Vaccination Shots"];
-      const csvContent = [
-        headers.join(","),
-        ...vaccinationReportRows.map((row) =>
-          [
-            row.vaccinationDate,
-            row.countySubcounty,
-            row.site,
-            row.vaccinationShots,
-          ]
-            .map((field) => `"${String(field).replace(/"/g, '""')}"`)
-            .join(","),
-        ),
-      ].join("\n");
+ const downloadVaccinationReport = () => {
+  try {
+    const headers = ["Vaccination Date", "County", "Subcounty", "Site", "Vaccination Shoats"];
+    const csvContent = [
+      headers.join(","),
+      ...vaccinationReportRows.map((row) =>
+        [
+          row.vaccinationDate,
+          row.county,
+          row.subcounty,
+          row.site,
+          row.vaccinationShots,
+        ]
+          .map((field) => `"${String(field).replace(/"/g, '""')}"`)
+          .join(","),
+      ),
+    ].join("\n");
+    // ...rest unchanged
 
       const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8" });
       const link = document.createElement("a");
       const objectUrl = window.URL.createObjectURL(blob);
       const programmeSuffix =
-        vaccinationReportProgramme === "ALL"
+        vaccinationReportProgramme === ALL_PROGRAMMES
           ? "all-programmes"
           : vaccinationReportProgramme.toLowerCase().replace(/\s+/g, "-");
 
@@ -1080,6 +1153,9 @@ const AnimalHealthPage = () => {
   // Dynamic colSpan for the table (accounts for the checkbox column)
   const baseColCount = 5; // Date, Location, Doses, Team, Actions
   const tableColSpan = isSelecting ? baseColCount + 1 : baseColCount;
+
+  const pageRangeStart = displayedActivities.length === 0 ? 0 : (safeCurrentPage - 1) * RECORDS_PER_PAGE + 1;
+  const pageRangeEnd = Math.min(safeCurrentPage * RECORDS_PER_PAGE, displayedActivities.length);
 
   // --------------------------------------------
   // RENDER
@@ -1496,20 +1572,38 @@ const AnimalHealthPage = () => {
 
         {/* --- Stats Overview --- */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Card 1: Regional Coverage */}
+          {/* Card 1: Total Animals (goats + sheep, NOT vaccine doses) */}
           <Card className="bg-white shadow-sm border-slate-200">
             <CardHeader className="flex flex-row items-center justify-between pb-2 pt-4 px-4">
-              <CardTitle className="text-sm font-medium text-slate-600">Total Animals</CardTitle>
+              <CardTitle className="text-sm font-medium text-slate-600">Animals Vaccinated</CardTitle>
               <MapPin className="h-4 w-4 text-emerald-500" />
             </CardHeader>
             <CardContent className="pb-4 px-4">
               <div className="text-2xl font-bold text-slate-900">
-                {formatNumber(totalDosesAdministered)}
+                {formatNumber(animalTotals.total)}
               </div>
-              <p className="text-xs text-slate-500 mt-1">
-                Animals vaccinated
-              </p>
-             
+              <div className="flex items-center gap-4 mt-2">
+                <p className="text-xs text-slate-500 flex items-center">
+                  <span className="w-2 h-2 rounded-full bg-amber-500 mr-1" />
+                  <span className="font-semibold text-slate-700">
+                    {formatNumber(animalTotals.goats)}
+                  </span>{" "}
+                  Goats
+                </p>
+                <p className="text-xs text-slate-500 flex items-center">
+                  <span className="w-2 h-2 rounded-full bg-teal-500 mr-1" />
+                  <span className="font-semibold text-slate-700">
+                    {formatNumber(animalTotals.sheep)}
+                  </span>{" "}
+                  Sheep
+                </p>
+              </div>
+              <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between">
+                <span className="text-xs text-slate-500">Vaccination shoats administered</span>
+                <span className="text-xs font-semibold text-emerald-700">
+                  {formatNumber(totalDosesAdministered)}
+                </span>
+              </div>
             </CardContent>
           </Card>
 
@@ -1542,7 +1636,7 @@ const AnimalHealthPage = () => {
             </CardContent>
           </Card>
 
-          {/* Card 3: Vaccination Rate (Year over Year) + Total Doses */}
+          {/* Card 3: Vaccination Rate (Year over Year) */}
           <Card className="bg-white shadow-sm border-slate-200">
             <CardHeader className="flex flex-row items-center justify-between pb-2 pt-4 px-4">
               <CardTitle className="text-sm font-medium text-slate-600">
@@ -1569,7 +1663,6 @@ const AnimalHealthPage = () => {
               <p className="text-xs text-slate-500 mt-1">
                 {vaccinationRate.currentYear} vs {vaccinationRate.previousYear}
               </p>
-             
             </CardContent>
           </Card>
         </div>
@@ -1614,7 +1707,7 @@ const AnimalHealthPage = () => {
                   <Label className="text-xs text-slate-600">Programme View</Label>
                   <Select
                     value={programmeView}
-                    onValueChange={(value) => setProgrammeView(value as ProgrammeView)}
+                    onValueChange={(value) => setProgrammeView(value)}
                   >
                     <SelectTrigger
                       className="h-9"
@@ -1627,18 +1720,12 @@ const AnimalHealthPage = () => {
                     <SelectContent>
                       {accessibleProgrammes.map((programmeOption) => (
                         <SelectItem key={programmeOption} value={programmeOption}>
-                          {programmeOption} (
-                          {
-                            activitiesByProgramme[
-                              programmeOption as keyof typeof activitiesByProgramme
-                            ].length
-                          }
-                          )
+                          {programmeOption} ({(activitiesByProgramme[programmeOption] || []).length})
                         </SelectItem>
                       ))}
                       {userCanReadAllAnimalHealthProgrammes && (
-                        <SelectItem value="ALL">
-                          ALL Programmes {filteredActivities.length}
+                        <SelectItem value={ALL_PROGRAMMES}>
+                          ALL Programmes ({filteredActivities.length})
                         </SelectItem>
                       )}
                     </SelectContent>
@@ -1659,14 +1746,14 @@ const AnimalHealthPage = () => {
                   <Label htmlFor="vaccination-report-programme">Programme</Label>
                   <Select
                     value={vaccinationReportProgramme}
-                    onValueChange={(value) => setVaccinationReportProgramme(value as ProgrammeView)}
+                    onValueChange={(value) => setVaccinationReportProgramme(value)}
                   >
                     <SelectTrigger id="vaccination-report-programme" className="bg-white">
                       <SelectValue placeholder="Select programme" />
                     </SelectTrigger>
                     <SelectContent>
                       {userCanReadAllAnimalHealthProgrammes && (
-                        <SelectItem value="ALL">ALL Programmes</SelectItem>
+                        <SelectItem value={ALL_PROGRAMMES}>ALL Programmes</SelectItem>
                       )}
                       {accessibleProgrammes.map((programmeOption) => (
                         <SelectItem key={programmeOption} value={programmeOption}>
@@ -1693,34 +1780,36 @@ const AnimalHealthPage = () => {
                   <Badge variant="outline">{vaccinationReportRows.length.toLocaleString()} records</Badge>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b border-slate-200 bg-white text-left text-xs uppercase text-slate-500">
-                        <th className="px-4 py-3 font-semibold">Vaccination date</th>
-                        <th className="px-4 py-3 font-semibold">County &amp; subcounty</th>
-                        <th className="px-4 py-3 font-semibold">Site</th>
-                        <th className="px-4 py-3 font-semibold">Vaccination shots</th>
+                 <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 bg-white text-left text-xs uppercase text-slate-500">
+                      <th className="px-4 py-3 font-semibold">Vaccination date</th>
+                      <th className="px-4 py-3 font-semibold">County</th>
+                      <th className="px-4 py-3 font-semibold">Subcounty</th>
+                      <th className="px-4 py-3 font-semibold">Site</th>
+                      <th className="px-4 py-3 font-semibold">Vaccination shoats</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vaccinationReportRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                          No vaccination records match the selected programme and date filters.
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {vaccinationReportRows.length === 0 ? (
-                        <tr>
-                          <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
-                            No vaccination records match the selected programme and date filters.
-                          </td>
+                    ) : (
+                      vaccinationReportRows.map((row, index) => (
+                        <tr key={`${row.vaccinationDate}-${row.site}-${index}`} className="border-b border-slate-100 last:border-b-0">
+                          <td className="px-4 py-3 text-slate-700">{row.vaccinationDate}</td>
+                          <td className="px-4 py-3 text-slate-700">{row.county}</td>
+                          <td className="px-4 py-3 text-slate-700">{row.subcounty}</td>
+                          <td className="px-4 py-3 text-slate-700">{row.site}</td>
+                          <td className="px-4 py-3 font-medium text-slate-900">{formatNumber(row.vaccinationShots)}</td>
                         </tr>
-                      ) : (
-                        vaccinationReportRows.map((row, index) => (
-                          <tr key={`${row.vaccinationDate}-${row.site}-${index}`} className="border-b border-slate-100 last:border-b-0">
-                            <td className="px-4 py-3 text-slate-700">{row.vaccinationDate}</td>
-                            <td className="px-4 py-3 text-slate-700">{row.countySubcounty}</td>
-                            <td className="px-4 py-3 text-slate-700">{row.site}</td>
-                            <td className="px-4 py-3 font-medium text-slate-900">{formatNumber(row.vaccinationShots)}</td>
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                      ))
+                    )}
+                  </tbody>
+                </table>
                 </div>
               </div>
             </div>
@@ -1731,12 +1820,12 @@ const AnimalHealthPage = () => {
         <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-700">
-              {programmeView === "ALL"
+              {programmeView === ALL_PROGRAMMES
                 ? "All Programme Activities"
                 : `${programmeView} Activities`}
             </h2>
             <p className="text-xs text-slate-500">
-              Showing {displayedActivities.length} records
+              Showing {displayedActivities.length === 0 ? 0 : pageRangeStart}-{pageRangeEnd} of {displayedActivities.length} records
             </p>
           </div>
           {userIsAdmin && (
@@ -1771,10 +1860,7 @@ const AnimalHealthPage = () => {
                   {isSelecting && (
                     <th className="py-3 px-4 text-left w-12">
                       <Checkbox
-                        checked={
-                          selectedActivities.length === displayedActivities.length &&
-                          displayedActivities.length > 0
-                        }
+                        checked={isPageFullySelected}
                         onCheckedChange={selectAllActivities}
                       />
                     </th>
@@ -1804,7 +1890,7 @@ const AnimalHealthPage = () => {
                     </td>
                   </tr>
                 ) : (
-                  displayedActivities.map((activity) => (
+                  paginatedActivities.map((activity) => (
                     <tr
                       key={activity.id}
                       className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors"
@@ -1886,6 +1972,38 @@ const AnimalHealthPage = () => {
               </tbody>
             </table>
           </div>
+
+          {/* --- Pagination Controls --- */}
+          {!loading && displayedActivities.length > 0 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-slate-200 bg-white">
+              <p className="text-xs text-slate-500">
+                Showing {pageRangeStart}-{pageRangeEnd} of {displayedActivities.length}
+              </p>
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={safeCurrentPage <= 1}
+                  onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" /> Previous
+                </Button>
+                <span className="text-xs text-slate-600">
+                  Page {safeCurrentPage} of {totalPages}
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={safeCurrentPage >= totalPages}
+                  onClick={() => setCurrentPage((prev) => Math.min(totalPages, prev + 1))}
+                >
+                  Next <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* --- EDIT DIALOG --- */}
@@ -1907,7 +2025,7 @@ const AnimalHealthPage = () => {
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Project</Label>
+                  <Label>Programme</Label>
                   <Select
                     value={activityForm.programme}
                     onValueChange={(v) => setActivityForm({ ...activityForm, programme: v })}
@@ -2006,7 +2124,7 @@ const AnimalHealthPage = () => {
                 <Label className="font-semibold text-blue-900">
                   Farmers ({beneficiaries.length})
                 </Label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
                   <Input
                     placeholder="Name"
                     value={beneficiaryForm.name}
@@ -2046,6 +2164,17 @@ const AnimalHealthPage = () => {
                     }
                     className="h-8"
                   />
+                  {/* FIX: Sheep input was missing here, so sheep counts entered manually
+                      during edit were always saved as 0. */}
+                  <Input
+                    placeholder="Sheep"
+                    type="number"
+                    value={beneficiaryForm.sheep}
+                    onChange={(e) =>
+                      setBeneficiaryForm({ ...beneficiaryForm, sheep: e.target.value })
+                    }
+                    className="h-8"
+                  />
                   <div className="flex gap-1">
                     <Button
                       size="sm"
@@ -2071,24 +2200,87 @@ const AnimalHealthPage = () => {
                     />
                   </div>
                 </div>
-                <div className="max-h-32 overflow-y-auto mt-2 space-y-1">
-                  {beneficiaries.map((b) => (
-                    <div
-                      key={b.id}
-                      className="flex justify-between items-center bg-white p-1 px-2 rounded border text-xs"
-                    >
-                      <span>
-                        {b.name} ({b.gender}) - {b.nationalId}
-                      </span>
-                      <span>
-                        G: {b.goats} S: {b.sheep}
-                      </span>
-                      <X
-                        className="h-3 w-3 cursor-pointer text-red-500"
-                        onClick={() => handleRemoveBeneficiary(b.id)}
-                      />
-                    </div>
-                  ))}
+                <div className="border border-slate-200 rounded-lg overflow-hidden mt-2 bg-white">
+                  <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="sticky top-0 bg-slate-50 z-10">
+                        <tr className="border-b border-slate-200">
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 w-8">#</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 min-w-[120px]">Name</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 w-24">Gender</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 min-w-[120px]">National ID</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 w-20">Goats</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 w-20">Sheep</th>
+                          <th className="py-2 px-2 text-left font-semibold text-slate-600 w-8" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {beneficiaries.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="py-4 px-2 text-center text-slate-500">
+                              No farmers added yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          beneficiaries.map((b, index) => (
+                            <tr key={b.id} className="border-b border-slate-100 last:border-b-0">
+                              <td className="py-1 px-2 text-slate-500">{index + 1}</td>
+                              <td className="py-1 px-2">
+                                <Input
+                                  value={b.name}
+                                  onChange={(e) => handleUpdateBeneficiary(b.id, "name", e.target.value)}
+                                  className="h-7 text-xs"
+                                />
+                              </td>
+                              <td className="py-1 px-2">
+                                <Select
+                                  value={b.gender}
+                                  onValueChange={(v) => handleUpdateBeneficiary(b.id, "gender", v)}
+                                >
+                                  <SelectTrigger className="h-7 text-xs">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="Male">Male</SelectItem>
+                                    <SelectItem value="Female">Female</SelectItem>
+                                  </SelectContent>
+                                </Select>
+                              </td>
+                              <td className="py-1 px-2">
+                                <Input
+                                  value={b.nationalId}
+                                  onChange={(e) => handleUpdateBeneficiary(b.id, "nationalId", e.target.value)}
+                                  className="h-7 text-xs font-mono"
+                                />
+                              </td>
+                              <td className="py-1 px-2">
+                                <Input
+                                  type="number"
+                                  value={b.goats}
+                                  onChange={(e) => handleUpdateBeneficiary(b.id, "goats", e.target.value)}
+                                  className="h-7 text-xs"
+                                />
+                              </td>
+                              <td className="py-1 px-2">
+                                <Input
+                                  type="number"
+                                  value={b.sheep}
+                                  onChange={(e) => handleUpdateBeneficiary(b.id, "sheep", e.target.value)}
+                                  className="h-7 text-xs"
+                                />
+                              </td>
+                              <td className="py-1 px-2 text-center">
+                                <X
+                                  className="h-3.5 w-3.5 cursor-pointer text-red-500 inline-block"
+                                  onClick={() => handleRemoveBeneficiary(b.id)}
+                                />
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
 
@@ -2256,12 +2448,18 @@ const AnimalHealthPage = () => {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 border p-4 rounded-xl bg-green-50">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 border p-4 rounded-xl bg-green-50">
                     <div className="text-center">
-                      <p className="text-2xl font-bold text-green-700">
-                        {formatNumber(getActivityTotalDoses(viewingActivity))}
+                      <p className="text-2xl font-bold text-amber-700">
+                        {formatNumber(getActivityAnimalCounts(viewingActivity).goats)}
                       </p>
-                      <p className="text-xs text-green-900">Total Doses</p>
+                      <p className="text-xs text-amber-900">Goats</p>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-2xl font-bold text-teal-700">
+                        {formatNumber(getActivityAnimalCounts(viewingActivity).sheep)}
+                      </p>
+                      <p className="text-xs text-teal-900">Sheep</p>
                     </div>
                     <div className="text-center">
                       <p className="text-2xl font-bold text-blue-700">
@@ -2275,6 +2473,14 @@ const AnimalHealthPage = () => {
                       </p>
                       <p className="text-xs text-purple-900">Female Farmers</p>
                     </div>
+                  </div>
+                  <div className="text-center -mt-2">
+                    <p className="text-xs text-slate-500">
+                      Vaccination shoats administered:{" "}
+                      <span className="font-semibold text-green-700">
+                        {formatNumber(getActivityTotalDoses(viewingActivity))}
+                      </span>
+                    </p>
                   </div>
 
                   <div>
@@ -2301,7 +2507,7 @@ const AnimalHealthPage = () => {
                             className="flex justify-between items-center bg-orange-50 border border-orange-100 p-2 rounded text-xs"
                           >
                             <div>
-                              <span className="font-semibold">{iss.name}</span> � raised by{" "}
+                              <span className="font-semibold">{iss.name}</span> - raised by{" "}
                               {iss.raisedBy}
                               <p className="text-slate-500 mt-0.5">{iss.description}</p>
                             </div>

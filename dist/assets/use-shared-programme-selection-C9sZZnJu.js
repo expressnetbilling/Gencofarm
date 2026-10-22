@@ -1,1 +1,0 @@
-import{r as n}from"./vendor-react-BUQIWGdw.js";import{Y as S,Z as c}from"./index-C0Rz-_ae.js";const p=(o,a)=>{const{allowAll:l=!1,fallbackToAll:r=!1}=a??{},{selection:e,setSelection:s}=S(),t=n.useMemo(()=>c(e,o,{allowAll:l,fallbackToAll:r}),[o,l,r,e]);return n.useEffect(()=>{t!==e&&s(t)},[t,s,e]),[t,i=>{s(c(i,o,{allowAll:l,fallbackToAll:r}))}]};export{p as u};

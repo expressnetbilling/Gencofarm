@@ -678,9 +678,9 @@ const FodderFarmersPage = () => {
                   variant="outline"
                   size="sm"
                   onClick={() => handleEdit(record)}
-                  className="h-8 w-8 p-0 hover:bg-blue-50 hover:text-blue-600 border-blue-200"
+                  className="h-8 w-8 p-0 hover:bg-green-50 hover:text-green-700 border-green-200"
                 >
-                  <Edit className="h-4 w-4 text-blue-500" />
+                  <Edit className="h-4 w-4 text-green-600" />
                 </Button>
                 <Button
                   variant="outline"
@@ -829,23 +829,23 @@ const FodderFarmersPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead className="rounded">
-                    <tr className="bg-green-100 p-1 px-3">
+                    <tr className="bg-green-100 p-1 px-3 text-green-900">
                       <th className="py-1 px-6">
                         <Checkbox
                           checked={selectedRecords.length === currentPageRecords.length && currentPageRecords.length > 0}
                           onCheckedChange={handleSelectAll}
                         />
                       </th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Date</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Location</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">County</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Model</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Land Size</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Pasture Acres</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Total Bales</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Yield/Harvest</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Farmers</th>
-                      <th className="py-1 px-6 font-medium text-gray-600">Actions</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Date</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Location</th>
+                      <th className="py-1 px-6 font-medium text-green-900">County</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Model</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Land Size</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Pasture Acres</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Total Bales</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Yield/Harvest</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Farmers</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1158,6 +1158,4 @@ const FodderFarmersPage = () => {
 };
 
 export default FodderFarmersPage;
-
-
 

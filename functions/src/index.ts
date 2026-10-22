@@ -26,3 +26,4 @@ export const getDb = (): admin.database.Database => admin.database();
 
 // Re-export the sendEmail function from its own module
 export { sendEmail } from "./send-email";
+export { downloadCapacityDocument } from "./download-capacity-document";

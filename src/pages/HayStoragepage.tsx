@@ -265,12 +265,12 @@ const getCurrentMonthDates = () => {
 
 const StatsCard = ({ title, value, icon: Icon, description }: StatsCardProps) => (
   <Card className="relative overflow-hidden border border-gray-200 bg-white text-slate-900 shadow-md">
-    <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-blue-500 to-purple-600"></div>
+    <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-green-500 to-green-700"></div>
     <CardHeader className="flex flex-row items-center justify-between space-y-0 px-4 pb-1.5 pt-3">
       <CardTitle className="truncate text-xs font-medium leading-tight text-slate-700 sm:text-sm">{title}</CardTitle>
     </CardHeader>
     <CardContent className="flex flex-row items-start gap-2 px-4 pb-3">
-      <div className="rounded-full bg-blue-50 p-1.5 text-blue-600">
+      <div className="rounded-full bg-green-50 p-1.5 text-green-600">
         <Icon className="h-4 w-4 sm:h-5 sm:w-5" />
       </div>
       <div className="min-w-0 flex-1">
@@ -356,7 +356,7 @@ const TableRow = ({ record, baleSourceFilter, isSelected, onSelectRecord, onView
   const baleSource = normalizeBaleSource(record.bale_source);
 
   return (
-  <tr className="border-b hover:bg-blue-50 transition-colors duration-200 group text-sm whitespace-nowrap">
+  <tr className="border-b hover:bg-green-50 transition-colors duration-200 group text-sm whitespace-nowrap">
     <td className="py-3 px-4">
       <Checkbox
         checked={isSelected}
@@ -403,10 +403,10 @@ const TableRow = ({ record, baleSourceFilter, isSelected, onSelectRecord, onView
           variant="outline"
           size="sm"
           onClick={() => onView(record)}
-          className="h-8 w-8 p-0 hover:bg-blue-50 hover:text-blue-600 border-blue-200"
+          className="h-8 w-8 p-0 hover:bg-green-50 hover:text-green-700 border-green-200"
           aria-label="View record"
         >
-          <Eye className="h-4 w-4 text-blue-500" />
+          <Eye className="h-4 w-4 text-green-600" />
         </Button>
         {/* Edit/Delete available for all raw records now */}
         {canManageRecords && (
@@ -1172,7 +1172,7 @@ const HayStoragePage = () => {
       {/* Header */}
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
         <div>
-          <h2 className="text-xl font-bold mb-2 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">Hay Storage Management</h2>
+          <h2 className="text-xl font-bold mb-2 bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">Hay Storage Management</h2>
          
         </div>
         <div className="flex flex-wrap gap-2 w-full xl:w-auto">
@@ -1205,7 +1205,7 @@ const HayStoragePage = () => {
                   <Trash2 className="h-4 w-4 mr-2" /> {deleteLoading ? "Deleting..." : `Delete (${selectedRecords.length})`}
                 </Button>
               )}
-              <Button onClick={handleExport} disabled={exportLoading || rawFilteredHayStorage.length === 0} className="bg-gradient-to-r from-blue-600 to-purple-700 hover:from-blue-700 hover:to-purple-800 text-white shadow-md text-xs">
+              <Button onClick={handleExport} disabled={exportLoading || rawFilteredHayStorage.length === 0} className="bg-green-600 text-white shadow-md hover:bg-green-700 text-xs">
                 <Download className="h-4 w-4 mr-2" /> {exportLoading ? "Exporting..." : `Export (${rawFilteredHayStorage.length})`}
               </Button>
             </>
@@ -1261,7 +1261,7 @@ const HayStoragePage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="min-w-max w-full border-collapse border border-gray-300 text-left whitespace-nowrap">
                   <thead className="rounded whitespace-nowrap">
-                    <tr className="bg-blue-100">
+                    <tr className="bg-green-100">
                       <th className="py-3 px-4">
                 <Checkbox
                           checked={selectedRecords.length === getCurrentPageRecords().length && getCurrentPageRecords().length > 0}
@@ -1270,17 +1270,17 @@ const HayStoragePage = () => {
                           className={!canManageRecords ? "invisible" : ""}
                         />
                       </th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">{getStorageDateHeader(filters.baleSource)}</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Programme</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Storage Facility</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">{getStorageDateHeader(filters.baleSource)}</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Programme</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Storage Facility</th>
                       {filters.baleSource === "all" && (
-                        <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Bales Type</th>
+                        <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Bales Type</th>
                       )}
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">{getBalesHeader(filters.baleSource)}</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Bales Sold</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Bales Balance</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Revenue</th>
-                      <th className="py-1 text-xs text-left px-6 font-medium text-gray-600">Actions</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">{getBalesHeader(filters.baleSource)}</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Bales Sold</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Bales Balance</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Revenue</th>
+                      <th className="py-1 text-xs text-left px-6 font-medium text-green-900">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1444,7 +1444,7 @@ const HayStoragePage = () => {
       <Dialog open={isViewDialogOpen} onOpenChange={setIsViewDialogOpen}>
         <DialogContent className="sm:max-w-2xl bg-white rounded-2xl max-h-[90vh] overflow-hidden">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-slate-900"><Eye className="h-5 w-5 text-blue-600" /> Hay Storage Details</DialogTitle>
+            <DialogTitle className="flex items-center gap-2 text-slate-900"><Eye className="h-5 w-5 text-green-600" /> Hay Storage Details</DialogTitle>
             <DialogDescription>Complete information for this hay storage record</DialogDescription>
           </DialogHeader>
           {viewingRecord && (
@@ -1467,7 +1467,7 @@ const HayStoragePage = () => {
                   {viewingRecord.pasture_stages.map((stage, index) => (
                     <div key={index} className="flex items-center justify-between bg-white rounded-lg p-3 border">
                       <span className="font-medium text-slate-900 capitalize">{stage.stage}</span>
-                      <Badge variant="outline" className="bg-blue-50 text-blue-700">{formatDate(stage.date)}</Badge>
+                      <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200">{formatDate(stage.date)}</Badge>
                     </div>
                   ))}
                   {viewingRecord.pasture_stages.length === 0 && <p className="text-sm text-gray-500 text-center py-2">No pasture stages recorded</p>}
@@ -1488,7 +1488,7 @@ const HayStoragePage = () => {
             </div>
           )}
           <DialogFooter>
-            <Button onClick={() => setIsViewDialogOpen(false)} className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white">Close</Button>
+            <Button onClick={() => setIsViewDialogOpen(false)} className="bg-green-600 text-white hover:bg-green-700">Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

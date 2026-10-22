@@ -18,7 +18,7 @@ import {
 
 import { 
   Users, GraduationCap, Beef, TrendingUp, Award, 
-  MapPin, Syringe, TargetIcon, Loader2, Calendar, PencilLine, Trash2, UserX, MoreVertical, ChevronLeft, ChevronRight, Clock, Package, ShoppingCart
+  MapPin, Syringe, TargetIcon, Loader2, Calendar, PencilLine, Trash2, UserX, MoreVertical, ChevronLeft, ChevronRight, Clock, Package, ShoppingCart, Warehouse, Droplets, ClipboardList
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -60,6 +60,7 @@ import {
   resolveAccessibleProgrammes,
 } from "@/lib/programme-access";
 import Chart from "react-apexcharts";
+import { get } from "firebase/database";
 
 // --- Constants ---
 const COLORS = {
@@ -82,7 +83,7 @@ const REPORT_DONUT_HEIGHT = 280;
 const REPORT_DONUT_INNER_RADIUS = 58;
 const REPORT_DONUT_OUTER_RADIUS = 90;
 const REPORT_DONUT_PADDING_ANGLE = 2;
-const REPORT_DONUT_CORNER_RADIUS = 6;
+const REPORT_DONUT_CORNER_RADIUS = 0;
 
 const HORIZONTAL_BAR_CHART_MARGIN = { top: 0, right: 12, left: 48, bottom: 0 };
 const HORIZONTAL_BAR_CHART_Y_AXIS_WIDTH = 68;
@@ -109,6 +110,8 @@ interface Farmer {
   registrationDate: string;
   femaleBreeds: string | number;
   maleBreeds: string | number;
+  newBreedsFemale?: string | number;
+  newBreedsMale?: string | number;
   ageDistribution?: any;
   aggregationGroup?: string;
   bucksServed?: string;
@@ -198,6 +201,104 @@ interface StaffDirectoryRecord {
   updatedBy?: string;
 }
 
+// A fodder-farm registration record. Each entry represents one fodder site
+// (community owned / individual / etc.) and bundles the farmers registered at
+// that site via the `farmers` array. The record-level fields (county, date,
+// totalBales, etc.) describe the site, while per-farmer info (gender, name,
+// phoneNo, idNo) lives inside the `farmers` list.
+interface FodderFarmerEntry {
+  gender?: string;
+  name?: string;
+  idNo?: string;
+  phoneNo?: string;
+}
+
+interface FodderFarmerRecord {
+  id: string;
+  county?: string;
+  subcounty?: string;
+  location?: string;
+  date?: string;
+  timestamp?: number;
+  createdAt?: number | string;
+  farmers?: FodderFarmerEntry[];
+  programme?: string;
+  username?: string;
+  totalBales?: string | number;
+  totalAcresPasture?: string | number;
+  yieldPerHarvest?: string | number;
+  landSize?: string | number;
+  model?: string;
+}
+
+// A borehole infrastructure record. The actual Firebase collection uses
+// PascalCase field names (County, SubCounty, BoreholeLocation,
+// PeopleUsingBorehole, WaterUsed) — those are the primary fields. The
+// camelCase variants are tolerated as a fallback in case the schema ever
+// changes.
+interface BoreholeRecord {
+  id: string;
+  county?: string;
+  County?: string;
+  subcounty?: string;
+  SubCounty?: string;
+  location?: string;
+  BoreholeLocation?: string;
+  ward?: string;
+  peopleUsingBorehole?: string | number;
+  PeopleUsingBorehole?: string | number;
+  waterUsed?: number;
+  WaterUsed?: number;
+  drilled?: boolean;
+  equipped?: boolean;
+  maintained?: boolean;
+  rehabilitated?: boolean;
+  programme?: string;
+  createdAt?: number | string;
+  date?: string | number;
+  status?: string;
+  username?: string;
+}
+
+const isRecordObject = (value: unknown): value is Record<string, any> =>
+  Boolean(value && typeof value === "object" && !Array.isArray(value));
+
+const BOREHOLE_RECORD_FIELDS = [
+  "BoreholeLocation", "Borehole Location", "location", "County", "county",
+  "PeopleUsingBorehole", "People Using Borehole", "people", "WaterUsed", "waterUsed",
+  "date", "Date", "createdAt", "created_at", "programme", "Programme",
+] as const;
+
+const isBoreholeRecord = (value: unknown): value is Record<string, any> =>
+  isRecordObject(value) && BOREHOLE_RECORD_FIELDS.some((field) => field in value);
+
+// BoreholeStorage can be keyed directly by record id or nested beneath a
+// programme. Flatten both structures before the report aggregates counties.
+const flattenBoreholeStorage = (rawData: unknown): BoreholeRecord[] => {
+  if (!isRecordObject(rawData)) return [];
+
+  const records: BoreholeRecord[] = [];
+  const visit = (value: unknown, id: string, programme = "", depth = 0) => {
+    if (!isRecordObject(value) || depth > 2) return;
+
+    if (isBoreholeRecord(value)) {
+      records.push({
+        ...value,
+        id,
+        programme: value.programme || value.Programme || programme || undefined,
+      });
+      return;
+    }
+
+    Object.entries(value).forEach(([childId, childValue]) => {
+      visit(childValue, childId, programme || id, depth + 1);
+    });
+  };
+
+  Object.entries(rawData).forEach(([id, value]) => visit(value, id));
+  return records;
+};
+
 type StaffManagementRow = {
   id: string;
   staffName: string;
@@ -228,6 +329,62 @@ type StaffMarkFormState = {
   note: string;
   dateAwarded: string;
 };
+
+type SummaryItem = {
+  label: string;
+  value: number;
+  prefix?: string;
+  suffix?: string;
+};
+
+type SummaryGroup = {
+  title: string;
+  items: SummaryItem[];
+};
+
+// Keeps populated metrics first, zero-value metrics pushed to the end
+const sortZeroLast = (items: SummaryItem[]): SummaryItem[] =>
+  [...items].sort((a, b) => {
+    const aZero = Number(a.value) === 0 ? 1 : 0;
+    const bZero = Number(b.value) === 0 ? 1 : 0;
+    return aZero - bZero;
+  });
+
+// Youth/Adult classification threshold — adjust if your programme
+// definition of "youth" uses a different cutoff age.
+const YOUTH_AGE_CUTOFF = 35;
+
+// Farmer.ageDistribution is typed `any` in this codebase, so this
+// tolerates a plain age number, a category string ("Youth"/"Adult"),
+// or an object like { category } / { age }.
+const classifyFarmerAgeGroup = (farmer: Farmer): "adult" | "youth" | null => {
+  const raw = farmer.ageDistribution;
+  if (raw === undefined || raw === null || raw === "") return null;
+
+  if (typeof raw === "string") {
+    const normalized = raw.trim().toLowerCase();
+    if (normalized.includes("youth")) return "youth";
+    if (normalized.includes("adult")) return "adult";
+    const numeric = parseNumericValue(raw);
+    if (numeric > 0) return numeric < YOUTH_AGE_CUTOFF ? "youth" : "adult";
+    return null;
+  }
+
+  if (typeof raw === "number") {
+    return raw < YOUTH_AGE_CUTOFF ? "youth" : "adult";
+  }
+
+  if (typeof raw === "object") {
+    const category = String(raw.category || raw.ageGroup || raw.group || "").trim().toLowerCase();
+    if (category.includes("youth")) return "youth";
+    if (category.includes("adult")) return "adult";
+    const numeric = parseNumericValue(raw.age ?? raw.value);
+    if (numeric > 0) return numeric < YOUTH_AGE_CUTOFF ? "youth" : "adult";
+  }
+
+  return null;
+};
+
 
 const EMPTY_STAFF_MARK_RECORDS: StaffMarkRecord[] = [];
 const EMPTY_STAFF_DIRECTORY_RECORDS: StaffDirectoryRecord[] = [];
@@ -296,6 +453,26 @@ const getNumberField = (obj: any, ...fieldNames: string[]): number => {
     }
   }
   return 0;
+};
+
+const hasNumberFieldValue = (obj: any, fieldName: string): boolean => {
+  return obj[fieldName] !== undefined && obj[fieldName] !== null && obj[fieldName] !== "";
+};
+
+const getFarmerBreedCounts = (farmer: Farmer): { male: number; female: number } => {
+  const hasNewBreedFields =
+    hasNumberFieldValue(farmer, "newBreedsMale") ||
+    hasNumberFieldValue(farmer, "newBreedsFemale");
+
+  return hasNewBreedFields
+    ? {
+        male: Math.max(0, getNumberField(farmer, "newBreedsMale")),
+        female: Math.max(0, getNumberField(farmer, "newBreedsFemale")),
+      }
+    : {
+        male: Math.max(0, getNumberField(farmer, "maleBreeds")),
+        female: Math.max(0, getNumberField(farmer, "femaleBreeds")),
+      };
 };
 
 const getArrayLikeSize = (value: unknown): number => {
@@ -374,6 +551,24 @@ const getAnimalHealthTotalDoses = (record: AnimalHealthRecord): number => {
   return getNumberField(record, "number_doses");
 };
 
+const getAnimalHealthVaccineDoses = (record: AnimalHealthRecord): Array<{ type: string; doses: number }> => {
+  if (Array.isArray(record.vaccines)) {
+    return record.vaccines
+      .map((vaccine) => ({
+        type: String(vaccine?.type || "Unknown").trim() || "Unknown",
+        doses: Number(vaccine?.doses) || 0,
+      }))
+      .filter((vaccine) => vaccine.doses > 0);
+  }
+
+  const doses = getNumberField(record, "number_doses");
+  if (doses <= 0) return [];
+  return [{ type: String(record.vaccinetype || "Unknown").trim() || "Unknown", doses }];
+};
+
+const formatVaccineDisplayName = (name: string): string =>
+  name.trim().toLowerCase() === "sheep and goat pox" ? "Pox" : name;
+
 const getAnimalHealthLocationName = (record: AnimalHealthRecord): string =>
   String(record.location || record.subcounty || record.county || "Unknown").trim() || "Unknown";
 
@@ -396,8 +591,11 @@ const buildLocationMetricSeries = (entries: Array<{ name: string; value: number 
 const hasMetricData = (entries: Array<{ value?: number | string }> | undefined): boolean =>
   Array.isArray(entries) && entries.some((entry) => parseNumericValue(entry.value) > 0);
 
-const hasRegistrationTrendData = (entries: Array<{ registrations?: number | string }> | undefined): boolean =>
-  Array.isArray(entries) && entries.some((entry) => parseNumericValue(entry.registrations) > 0);
+const hasRegistrationTrendData = (
+  entries: Array<{ registrations?: number | string; training?: number | string }> | undefined,
+): boolean =>
+  Array.isArray(entries) &&
+  entries.some((entry) => parseNumericValue(entry.registrations) > 0 || parseNumericValue(entry.training) > 0);
 
 const isDateInRange = (date: any, startDate: string, endDate: string): boolean => {
   if (!startDate && !endDate) return true;
@@ -449,22 +647,6 @@ const getCurrentYearDates = () => {
   };
 };
 
-const getQ1Dates = (year: number) => { 
-  return { startDate: `${year}-01-01`, endDate: `${year}-03-31` };
-};
-
-const getQ2Dates = (year: number) => { 
-  return { startDate: `${year}-01-01`, endDate: `${year}-06-30` };
-};
-
-const getQ3Dates = (year: number) => { 
-  return { startDate: `${year}-01-01`, endDate: `${year}-09-30` };
-};
-
-const getQ4Dates = (year: number) => { 
-  return { startDate: `${year}-01-01`, endDate: `${year}-12-31` };
-};
-
 const USE_REMOTE_ANALYTICS = false;
 
 // How long fetched collections are considered fresh before a background refetch is required.
@@ -506,14 +688,15 @@ type PerformanceReportData = {
   countyPerformanceData: Array<{ name: string; value: number }>;
   subcountyPerformanceData: Array<{ name: string; value: number; county: string }>;
   wardPerformanceData: Array<{ name: string; value: number; county: string }>;
-  registrationTrendData: Array<{ name: string; registrations: number }>;
-  registrationTrendComparisonData: Array<{ name: string; registrations: number }>;
+  registrationTrendData: Array<{ name: string; registrations: number; training: number }>;
+  registrationTrendComparisonData: Array<{ name: string; registrations: number; training: number }>;
   topLocations: Array<{ name: string; value: number; county: string }>;
   topCustomers: Array<{ name: string; value: number; county: string }>;
   totalGoatsPurchased: number;
   topFieldOfficers: Array<{ name: string; value: number; county: string }>;
   topStaffAwarded: Array<{ name: string; value: number }>;
   totalDosesGivenOut: number;
+  vaccineDoseBreakdown: Array<{ name: string; value: number }>;
   uniqueCounties: number;
   totalBreedsDistributed: number;
   breedsMale: number;
@@ -527,9 +710,22 @@ type PerformanceReportData = {
   breedsByCountyData: Array<{ name: string; value: number }>;
   breedsBySubcountyData: Array<{ name: string; value: number }>;
   breedsByLocationData: Array<{ name: string; value: number }>;
-  vaccinationByCountyData: Array<{ name: string; value: number }>;
+ vaccinationByCountyData: Array<{ name: string; value: number }>;
   vaccinationBySubcountyData: Array<{ name: string; value: number }>;
-  dosesByLocationData: Array<{ name: string; value: number }>;
+  dosesByLocationData: Array<{ name: string; value: number; county: string }>;
+  adultFarmers: number;
+  youthFarmers: number;
+  adultFarmersPercentage: string;
+  youthFarmersPercentage: string;
+  maleTrainedFarmers: number;
+  femaleTrainedFarmers: number;
+  adultTrainedFarmers: number;
+  youthTrainedFarmers: number;
+  maleTrainedPercentage: string;
+  femaleTrainedPercentage: string;
+  adultTrainedPercentage: string;
+  youthTrainedPercentage: string;
+  totalLocationsVisited: number;
 };
 
 const EMPTY_PERFORMANCE_DATA: PerformanceReportData = {
@@ -557,6 +753,7 @@ const EMPTY_PERFORMANCE_DATA: PerformanceReportData = {
   topFieldOfficers: [],
   topStaffAwarded: [],
   totalDosesGivenOut: 0,
+  vaccineDoseBreakdown: [],
   uniqueCounties: 0,
   totalBreedsDistributed: 0,
   breedsMale: 0,
@@ -570,9 +767,22 @@ const EMPTY_PERFORMANCE_DATA: PerformanceReportData = {
   breedsByCountyData: [],
   breedsBySubcountyData: [],
   breedsByLocationData: [],
-  vaccinationByCountyData: [],
+    vaccinationByCountyData: [],
   vaccinationBySubcountyData: [],
   dosesByLocationData: [],
+  adultFarmers: 0,
+  youthFarmers: 0,
+  adultFarmersPercentage: "0.0",
+  youthFarmersPercentage: "0.0",
+  maleTrainedFarmers: 0,
+  femaleTrainedFarmers: 0,
+  adultTrainedFarmers: 0,
+  youthTrainedFarmers: 0,
+  maleTrainedPercentage: "0.0",
+  femaleTrainedPercentage: "0.0",
+  adultTrainedPercentage: "0.0",
+  youthTrainedPercentage: "0.0",
+  totalLocationsVisited: 0,
 };
 
 const normalizeProgramme = (value: unknown): string => {
@@ -581,6 +791,8 @@ const normalizeProgramme = (value: unknown): string => {
   if (normalized === "KPMD 2" || normalized === "KPMD-2") return "KPMD 2";
   return normalized;
 };
+
+const QUARTERLY_FARMER_TARGET = 117 * 3;
 
 function computeLocalPerformanceReportData(
   farmers: Farmer[],
@@ -593,39 +805,46 @@ function computeLocalPerformanceReportData(
   selectedProgramme: string | null,
   selectedYear: number | null,
   canViewAllProgrammeData: boolean,
+  selectedCounty = ALL_COUNTIES_VALUE,
 ): PerformanceReportData {
   if (!selectedProgramme) return EMPTY_PERFORMANCE_DATA;
 
   const filteredFarmers = farmers.filter((farmer) => {
     const farmerDate = farmer.createdAt || farmer.registrationDate;
     return matchesProgrammeSelection(farmer.programme, selectedProgramme, canViewAllProgrammeData) &&
+      matchesCountySelection(farmer.county, selectedCounty) &&
       isDateInRange(farmerDate, dateRange.startDate, dateRange.endDate);
   });
 
   const filteredTraining = trainingRecords.filter((record) => {
     const recordDate = getTrainingRecordDate(record);
     return matchesProgrammeSelection(record.programme, selectedProgramme, canViewAllProgrammeData) &&
+      matchesCountySelection(record.county, selectedCounty) &&
       isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
   });
   const filteredAnimalHealthActivities = animalHealthActivities.filter((record) => {
     const recordDate = record.createdAt || record.date;
     return matchesProgrammeSelection(record.programme, selectedProgramme, canViewAllProgrammeData) &&
+      matchesCountySelection(record.county, selectedCounty) &&
       isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
   });
   const filteredOfftakeRecords = offtakeRecords.filter((record) => {
     const recordDate = record.date || record.Date || record.createdAt;
     return matchesProgrammeSelection(record.programme, selectedProgramme, canViewAllProgrammeData) &&
+      matchesCountySelection((record as any).county ?? (record as any).County, selectedCounty) &&
       isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
   });
   const filteredStaffMarks = staffMarkRecords.filter((record) => {
     const recordDate = record.dateAwarded || record.createdAt;
     return matchesProgrammeSelection(record.programme, selectedProgramme, canViewAllProgrammeData) &&
+      matchesCountySelection((record as any).county ?? (record as any).County, selectedCounty) &&
       isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
   });
   const requestedProgramme = normalizeProgramme(selectedProgramme);
   const includeAllProgrammes = selectedProgramme === ALL_PROGRAMMES_VALUE || !requestedProgramme;
   const programmeFarmers = farmers.filter((farmer) =>
-    matchesProgrammeSelection(farmer.programme, selectedProgramme, canViewAllProgrammeData)
+    matchesProgrammeSelection(farmer.programme, selectedProgramme, canViewAllProgrammeData) &&
+    matchesCountySelection(farmer.county, selectedCounty)
   );
 
   let maleFarmers = 0;
@@ -637,9 +856,11 @@ function computeLocalPerformanceReportData(
   let totalDosesGivenOut = 0;
   let totalVaccinatedAnimals = 0;
   let vaccinatedFarmersCount = 0;
-  let breedsMale = 0;
+   let breedsMale = 0;
   let breedsFemale = 0;
   let farmersWithBreedData = 0;
+  let adultFarmers = 0;
+  let youthFarmers = 0;
   const countyMap: Record<string, number> = {};
   const subcountyMap: Record<string, number> = {};
   const locationMap: Record<string, number> = {};
@@ -658,6 +879,8 @@ function computeLocalPerformanceReportData(
   const vaccinationByCountyMap: Record<string, number> = {};
   const vaccinationBySubcountyMap: Record<string, number> = {};
   const dosesByLocationMap: Record<string, number> = {};
+  const dosesLocationCountyMap: Record<string, Record<string, number>> = {};
+  const vaccineDoseMap: Record<string, number> = {};
   const selectedYearNumber = selectedYear && Number.isFinite(selectedYear) ? selectedYear : null;
   const currentYear = new Date().getFullYear();
   const trendYear = selectedYearNumber ?? null;
@@ -676,10 +899,13 @@ function computeLocalPerformanceReportData(
     totalSheep += sheep;
     totalCattle += cattle;
 
-    const maleBreedCount = getNumberField(farmer, "maleBreeds");
-    const femaleBreedCount = getNumberField(farmer, "femaleBreeds");
+    const { male: maleBreedCount, female: femaleBreedCount } = getFarmerBreedCounts(farmer);
     breedsMale += maleBreedCount;
     breedsFemale += femaleBreedCount;
+
+    const ageGroup = classifyFarmerAgeGroup(farmer);
+    if (ageGroup === "adult") adultFarmers += 1;
+    else if (ageGroup === "youth") youthFarmers += 1;
 
     const county = String(farmer.county || "Unknown").trim() || "Unknown";
     const subcounty = String(farmer.subcounty || "Unknown").trim() || "Unknown";
@@ -735,9 +961,16 @@ function computeLocalPerformanceReportData(
     const doses = getAnimalHealthTotalDoses(record);
     totalDosesGivenOut += doses;
     const location = getAnimalHealthLocationName(record);
+    const county = String(record.county || "Unknown").trim() || "Unknown";
     if (doses > 0) {
       dosesByLocationMap[location] = (dosesByLocationMap[location] || 0) + doses;
+      dosesLocationCountyMap[location] = dosesLocationCountyMap[location] || {};
+      dosesLocationCountyMap[location][county] = (dosesLocationCountyMap[location][county] || 0) + doses;
     }
+    getAnimalHealthVaccineDoses(record).forEach((vaccine) => {
+      const vaccineName = formatVaccineDisplayName(vaccine.type);
+      vaccineDoseMap[vaccineName] = (vaccineDoseMap[vaccineName] || 0) + vaccine.doses;
+    });
   });
 
   filteredOfftakeRecords.forEach((record) => {
@@ -746,6 +979,30 @@ function computeLocalPerformanceReportData(
 
   const totalAnimals = totalGoats + totalSheep + totalCattle;
   const totalTrainedFarmers = filteredTraining.reduce((sum, record) => sum + getTrainingRecordFarmers(record), 0);
+
+  let maleTrainedFarmers = 0;
+  let femaleTrainedFarmers = 0;
+  let adultTrainedFarmers = 0;
+  let youthTrainedFarmers = 0;
+
+  filteredTraining.forEach((record) => {
+    const entries = Array.isArray(record.entries)
+      ? record.entries
+      : record.entries && typeof record.entries === "object"
+        ? Object.values(record.entries as Record<string, any>)
+        : [record as Record<string, any>];
+
+    entries.forEach((entry) => {
+      maleTrainedFarmers += getNumberField(entry, "maleFarmers", "male", "trainedMale", "maleTrained");
+      femaleTrainedFarmers += getNumberField(entry, "femaleFarmers", "female", "trainedFemale", "femaleTrained");
+      adultTrainedFarmers += getNumberField(entry, "adultFarmers", "adult", "adultsTrained");
+      youthTrainedFarmers += getNumberField(entry, "youthFarmers", "youth", "youthsTrained");
+    });
+  });
+
+  const totalLocationsVisited = new Set(
+    filteredAnimalHealthActivities.map((record) => getAnimalHealthLocationName(record)),
+  ).size;
   const countyPerformanceData = Object.entries(countyMap)
     .map(([name, value]) => ({ name, value }))
     .sort((a, b) => b.value - a.value);
@@ -799,7 +1056,7 @@ function computeLocalPerformanceReportData(
     .sort((a, b) => b.value - a.value)
     .slice(0, 5);
   const registrationTrendData = (() => {
-    const trendData: Array<{ name: string; registrations: number }> = [];
+    const trendData: Array<{ name: string; registrations: number; training: number }> = [];
     if (timeFrame === "weekly") {
       for (let offset = 3; offset >= 0; offset -= 1) {
         const weekStart = new Date();
@@ -810,7 +1067,11 @@ function computeLocalPerformanceReportData(
           const date = parseDate(farmer.createdAt || farmer.registrationDate);
           return !!date && date >= weekStart && date <= weekEnd;
         }).length;
-        trendData.push({ name: `Week ${4 - offset}`, registrations: count });
+        const training = filteredTraining.reduce((sum, record) => {
+          const date = parseDate(getTrainingRecordDate(record));
+          return date && date >= weekStart && date <= weekEnd ? sum + getTrainingRecordFarmers(record) : sum;
+        }, 0);
+        trendData.push({ name: `Week ${4 - offset}`, registrations: count, training });
       }
       return trendData;
     }
@@ -827,7 +1088,15 @@ function computeLocalPerformanceReportData(
           const monthEnd = new Date(analysisYear, index + 1, 0);
           return date >= monthStart && date <= monthEnd;
         }).length;
-        trendData.push({ name: monthName, registrations: count });
+        const training = filteredTraining.reduce((sum, record) => {
+          const date = parseDate(getTrainingRecordDate(record));
+          if (!date) return sum;
+          if (trendYear === null) return date.getMonth() === index ? sum + getTrainingRecordFarmers(record) : sum;
+          const monthStart = new Date(analysisYear, index, 1);
+          const monthEnd = new Date(analysisYear, index + 1, 0);
+          return date >= monthStart && date <= monthEnd ? sum + getTrainingRecordFarmers(record) : sum;
+        }, 0);
+        trendData.push({ name: monthName, registrations: count, training });
       });
       return trendData;
     }
@@ -841,7 +1110,11 @@ function computeLocalPerformanceReportData(
           const date = parseDate(farmer.createdAt || farmer.registrationDate);
           return !!date && date >= monthStart && date <= monthEnd;
         }).length;
-        trendData.push({ name: monthName, registrations: count });
+        const training = filteredTraining.reduce((sum, record) => {
+          const date = parseDate(getTrainingRecordDate(record));
+          return date && date >= monthStart && date <= monthEnd ? sum + getTrainingRecordFarmers(record) : sum;
+        }, 0);
+        trendData.push({ name: monthName, registrations: count, training });
       });
       return trendData;
     }
@@ -862,7 +1135,11 @@ function computeLocalPerformanceReportData(
         const date = parseDate(farmer.createdAt || farmer.registrationDate);
         return !!date && date >= yearStart && date <= yearEnd;
       }).length;
-      trendData.push({ name: String(year), registrations: count });
+      const training = filteredTraining.reduce((sum, record) => {
+        const date = parseDate(getTrainingRecordDate(record));
+        return date && date >= yearStart && date <= yearEnd ? sum + getTrainingRecordFarmers(record) : sum;
+      }, 0);
+      trendData.push({ name: String(year), registrations: count, training });
     }
     return trendData;
   })();
@@ -873,7 +1150,15 @@ function computeLocalPerformanceReportData(
       const date = parseDate(farmer.createdAt || farmer.registrationDate);
       return !!date && date >= yearStart && date <= yearEnd;
     }).length;
-    return { name: String(year), registrations: count };
+    const training = trainingRecords.reduce((sum, record) => {
+      const date = parseDate(getTrainingRecordDate(record));
+      return matchesProgrammeSelection(record.programme, selectedProgramme, canViewAllProgrammeData) &&
+        matchesCountySelection(record.county, selectedCounty) &&
+        date && date >= yearStart && date <= yearEnd
+        ? sum + getTrainingRecordFarmers(record)
+        : sum;
+    }, 0);
+    return { name: String(year), registrations: count, training };
   });
   const uniqueCounties = new Set(
     filteredFarmers.map((farmer) => String(farmer.county || "").trim()).filter(Boolean),
@@ -898,9 +1183,19 @@ function computeLocalPerformanceReportData(
     .sort((a, b) => b.value - a.value)
     .slice(0, 10);
   const dosesByLocationData = Object.entries(dosesByLocationMap)
-    .map(([name, value]) => ({ name, value }))
+    .map(([name, value]) => {
+      const countyEntries = Object.entries(dosesLocationCountyMap[name] || {});
+      const county =
+        countyEntries.length > 0 ?
+          countyEntries.sort((left, right) => right[1] - left[1])[0][0] :
+          "Unknown";
+      return { name, value, county };
+    })
     .sort((a, b) => b.value - a.value)
     .slice(0, 10);
+  const vaccineDoseBreakdown = Object.entries(vaccineDoseMap)
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value);
 
   return {
     scope: "performance-report",
@@ -927,6 +1222,7 @@ function computeLocalPerformanceReportData(
     topFieldOfficers,
     topStaffAwarded,
     totalDosesGivenOut,
+    vaccineDoseBreakdown,
     uniqueCounties,
     totalBreedsDistributed,
     breedsMale,
@@ -937,12 +1233,26 @@ function computeLocalPerformanceReportData(
     vaccinationRate: totalAnimals > 0 ? ((totalVaccinatedAnimals / totalAnimals) * 100).toFixed(1) : "0.0",
     vaccinatedAnimals: totalVaccinatedAnimals,
     vaccinatedFarmersCount,
-    breedsByCountyData,
+        breedsByCountyData,
     breedsBySubcountyData,
     breedsByLocationData,
     vaccinationByCountyData,
     vaccinationBySubcountyData,
     dosesByLocationData,
+    adultFarmers,
+    youthFarmers,
+    adultFarmersPercentage: filteredFarmers.length > 0 ? ((adultFarmers / filteredFarmers.length) * 100).toFixed(1) : "0.0",
+    youthFarmersPercentage: filteredFarmers.length > 0 ? ((youthFarmers / filteredFarmers.length) * 100).toFixed(1) : "0.0",
+    maleTrainedFarmers,
+    femaleTrainedFarmers,
+    adultTrainedFarmers,
+    youthTrainedFarmers,
+    maleTrainedPercentage: totalTrainedFarmers > 0 ? ((maleTrainedFarmers / totalTrainedFarmers) * 100).toFixed(1) : "0.0",
+    femaleTrainedPercentage: totalTrainedFarmers > 0 ? ((femaleTrainedFarmers / totalTrainedFarmers) * 100).toFixed(1) : "0.0",
+    adultTrainedPercentage: totalTrainedFarmers > 0 ? ((adultTrainedFarmers / totalTrainedFarmers) * 100).toFixed(1) : "0.0",
+    youthTrainedPercentage: totalTrainedFarmers > 0 ? ((youthTrainedFarmers / totalTrainedFarmers) * 100).toFixed(1) : "0.0",
+    totalLocationsVisited,
+  
   };
 }
 
@@ -958,6 +1268,7 @@ const useProcessedData = (
   selectedProgramme: string | null,
   selectedYear: number | null,
   canViewAllProgrammeData: boolean,
+  selectedCounty: string,
 ) => {
   const queryResult = useQuery({
     queryKey: [
@@ -967,6 +1278,7 @@ const useProcessedData = (
       dateRange.endDate,
       timeFrame,
       selectedYear,
+      selectedCounty,
     ],
     queryFn: () =>
       fetchAnalysisSummary({
@@ -999,8 +1311,9 @@ const useProcessedData = (
             selectedProgramme,
             selectedYear,
             canViewAllProgrammeData,
+            selectedCounty,
           ),
-    [_allFarmers, _trainingRecords, _animalHealthActivities, _offtakeRecords, _staffMarkRecords, dateRange, timeFrame, selectedProgramme, selectedYear, canViewAllProgrammeData],
+    [_allFarmers, _trainingRecords, _animalHealthActivities, _offtakeRecords, _staffMarkRecords, dateRange, timeFrame, selectedProgramme, selectedYear, canViewAllProgrammeData, selectedCounty],
   );
 
   const remoteData = useMemo(
@@ -1166,6 +1479,15 @@ const REPORT_VIEW_PROFILES: Record<ReportAudience, { title: string; sections: Re
 };
 
 const ALL_YEARS_VALUE = "ALL";
+const ALL_COUNTIES_VALUE = "ALL_COUNTIES";
+
+const normalizeCountyFilterValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const matchesCountySelection = (recordCounty: unknown, selectedCounty: string): boolean => {
+  if (!selectedCounty || selectedCounty === ALL_COUNTIES_VALUE) return true;
+  return normalizeCountyFilterValue(recordCounty) === normalizeCountyFilterValue(selectedCounty);
+};
 
 const resolveReportAudience = (
   userRole: string | null | undefined,
@@ -1265,7 +1587,7 @@ const HayBalesSourceDonutChart = ({
             innerRadius={REPORT_DONUT_INNER_RADIUS}
             outerRadius={REPORT_DONUT_OUTER_RADIUS}
             paddingAngle={REPORT_DONUT_PADDING_ANGLE}
-            cornerRadius={2}
+            cornerRadius={0}
             dataKey="value"
             label={renderLabel}
             labelLine={false}
@@ -1487,7 +1809,7 @@ const VaccinationSourceComparisonChart = ({
 const RegistrationTrendChart = ({
   data,
 }: {
-  data: Array<{ name: string; registrations: number }>;
+  data: Array<{ name: string; registrations: number; training?: number }>;
 }) => {
   const hasData = hasRegistrationTrendData(data);
 
@@ -1505,13 +1827,22 @@ const RegistrationTrendChart = ({
         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
         <XAxis dataKey="name" tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
         <YAxis allowDecimals={false} tick={{ fontSize: 11 }} axisLine={false} tickLine={false} />
-        <Tooltip formatter={(value: number | string) => [Number(value).toLocaleString(), "Registrations"]} />
+        <Tooltip formatter={(value: number | string, name: string) => [Number(value).toLocaleString(), name]} />
         <Legend verticalAlign="bottom" height={36} iconType="circle" wrapperStyle={{ fontSize: 11 }} />
         <Line
           type="monotone"
           dataKey="registrations"
           name="Registrations"
           stroke={COLORS.darkBlue}
+          strokeWidth={2}
+          dot={{ r: 3 }}
+          activeDot={{ r: 5 }}
+        />
+        <Line
+          type="monotone"
+          dataKey="training"
+          name="Training"
+          stroke={COLORS.orange}
           strokeWidth={2}
           dot={{ r: 3 }}
           activeDot={{ r: 5 }}
@@ -1604,36 +1935,41 @@ const SubcountyRegistrationDonutChart = ({
   };
 
   return (
-    <div className="relative rounded-2xl p-2">
-      <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
-        <PieChart>
-          <Pie
-            data={data}
-            cx="50%"
-            cy="50%"
-            innerRadius={REPORT_DONUT_INNER_RADIUS}
-            outerRadius={REPORT_DONUT_OUTER_RADIUS}
-            paddingAngle={REPORT_DONUT_PADDING_ANGLE}
-            cornerRadius={REPORT_DONUT_CORNER_RADIUS}
-            dataKey="value"
-            label={renderOuterLabel}
-            labelLine={false}
-          >
-            {data.map((entry, index) => (
-              <Cell
-                key={`subcounty-donut-${index}`}
-                fill={SUBCOUNTY_DONUT_COLORS[index % SUBCOUNTY_DONUT_COLORS.length]}
-                stroke="none"
-                strokeWidth={0}
-              />
-            ))}
-          </Pie>
-          <Tooltip content={renderDonutTooltip} />
-        </PieChart>
-      </ResponsiveContainer>
-      <div className="pointer-events-none absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800 shadow-lg ring-2 ring-slate-700">
-        <MapPin className="h-4 w-4 text-cyan-400" />
+    <div className="rounded-2xl p-2">
+      <div className="relative">
+        <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
+          <PieChart>
+            <Pie
+              data={data}
+              cx="50%"
+              cy="50%"
+              innerRadius={REPORT_DONUT_INNER_RADIUS}
+              outerRadius={REPORT_DONUT_OUTER_RADIUS}
+              paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+              cornerRadius={REPORT_DONUT_CORNER_RADIUS}
+              dataKey="value"
+              label={renderOuterLabel}
+              labelLine={false}
+            >
+              {data.map((entry, index) => (
+                <Cell
+                  key={`subcounty-donut-${index}`}
+                  fill={SUBCOUNTY_DONUT_COLORS[index % SUBCOUNTY_DONUT_COLORS.length]}
+                  stroke="none"
+                  strokeWidth={0}
+                />
+              ))}
+            </Pie>
+            <Tooltip content={renderDonutTooltip} />
+          </PieChart>
+        </ResponsiveContainer>
+        <div className="pointer-events-none absolute left-1/2 top-1/2 flex h-11 w-11 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-slate-800 shadow-lg ring-2 ring-slate-700">
+          <MapPin className="h-4 w-4 text-cyan-400" />
+        </div>
       </div>
+      {/* Color-coded indicator row — one dot + subcounty name per slice, using the
+          same SUBCOUNTY_DONUT_COLORS mapping as the ring so each segment is
+          identifiable at a glance instead of relying on the leader-line labels alone. */}
     </div>
   );
 };
@@ -1779,14 +2115,23 @@ const VaccinationAreaList = ({
   );
 };
 
-// Vertical column chart for subcounty vaccination totals. Height and
-// category gap are tuned so bars stay compact rather than floating apart
-// when there are only a handful of subcounties.
+// Matches the compact cyan Apex column chart used for registration wards:
+// hidden crowded x-axis labels, dashed grid, and hover-only category details.
 const VaccinationSubcountyBarChart = ({
   data,
 }: {
   data: Array<{ name: string; value: number }>;
 }) => {
+  const { categories, counts } = useMemo(() => {
+    const cats: string[] = [];
+    const vals: number[] = [];
+    data.forEach((entry) => {
+      cats.push(entry.name);
+      vals.push(entry.value);
+    });
+    return { categories: cats, counts: vals };
+  }, [data]);
+
   if (data.length === 0) {
     return (
       <div className="flex h-[280px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
@@ -1795,25 +2140,52 @@ const VaccinationSubcountyBarChart = ({
     );
   }
 
+  const options: ApexCharts.ApexOptions = {
+    chart: { height: 280, background: "transparent", toolbar: { show: false }, fontFamily: "inherit", zoom: { enabled: false }, selection: { enabled: false } },
+    plotOptions: {
+      bar: {
+        columnWidth: "80%",
+        borderRadius: 0,
+        borderRadiusApplication: "end",
+      },
+    },
+    colors: ["#22d3ee"],
+    xaxis: {
+      categories,
+      labels: { show: false },
+      axisBorder: { show: false },
+      axisTicks: { show: false },
+    },
+    yaxis: {
+      title: { text: "Registrations", style: { fontSize: "11px", color: "#64748b" } },
+      labels: { style: { fontSize: "11px" } },
+    },
+    grid: { borderColor: "#f1f5f9", strokeDashArray: 4 },
+    dataLabels: { enabled: false },
+    tooltip: {
+      shared: false,
+      intersect: true,
+      custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
+        const subcounty = categories[dataPointIndex] || "Unknown";
+        const vaccinated = counts[dataPointIndex] || 0;
+        return `
+          <div style="padding:8px 12px;font-size:12px;line-height:1.5;">
+            <div style="font-weight:600;color:#0f172a;">${subcounty}</div>
+            <div style="color:#0f172a;">Vaccinated animals: <strong>${Number(vaccinated).toLocaleString()}</strong></div>
+          </div>
+        `;
+      },
+    },
+    legend: { show: false },
+  };
+
   return (
-    <ResponsiveContainer width="100%" height={280}>
-      <BarChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 52 }} barCategoryGap="28%">
-        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-        <XAxis
-          dataKey="name"
-          axisLine={false}
-          tickLine={false}
-          interval={0}
-          angle={-35}
-          textAnchor="end"
-          height={70}
-          tick={{ fontSize: 10 }}
-        />
-        <YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fontSize: 11 }} />
-        <Tooltip formatter={(value: number | string) => [Number(value).toLocaleString(), "Vaccinated Animals"]} />
-        <Bar dataKey="value" radius={[4, 4, 0, 0]} barSize={22} fill={COLORS.maroon} />
-      </BarChart>
-    </ResponsiveContainer>
+    <Chart
+      options={options}
+      series={[{ name: "Vaccinated Animals", data: counts }]}
+      type="bar"
+      height={280}
+    />
   );
 };
 
@@ -1917,9 +2289,11 @@ const PerformanceReport = () => {
     animalHealth: AnimalHealthRecord[] | null;
     offtakes: OfftakeRecord[] | null;
     hayStorage: any[] | null;
+    fodderFarmers: FodderFarmerRecord[] | null;
+    boreholes: BoreholeRecord[] | null;
     programmes: string;
     timestamp: number;
-  }>({ farmers: null, training: null, animalHealth: null, offtakes: null, hayStorage: null, programmes: "", timestamp: 0 });
+  }>({ farmers: null, training: null, animalHealth: null, offtakes: null, hayStorage: null, fodderFarmers: null, boreholes: null, programmes: "", timestamp: 0 });
   
   const [loading, setLoading] = useState(true);
   const [allFarmers, setAllFarmers] = useState<Farmer[]>([]);
@@ -1927,6 +2301,8 @@ const PerformanceReport = () => {
   const [animalHealthActivities, setAnimalHealthActivities] = useState<AnimalHealthRecord[]>([]);
   const [offtakeRecords, setOfftakeRecords] = useState<OfftakeRecord[]>([]);
   const [hayStorageRecords, setHayStorageRecords] = useState<any[]>([]);
+  const [fodderFarmersRecords, setFodderFarmersRecords] = useState<FodderFarmerRecord[]>([]);
+  const [boreholesRecords, setBoreholesRecords] = useState<BoreholeRecord[]>([]);
   const [staffDirectoryRecords, setStaffDirectoryRecords] = useState<StaffDirectoryRecord[]>([]);
   const [staffMarkRecords, setStaffMarkRecords] = useState<StaffMarkRecord[]>([]);
   const [createStaffForm, setCreateStaffForm] = useState<CreateStaffFormState>(createDefaultStaffForm);
@@ -1944,7 +2320,8 @@ const PerformanceReport = () => {
 
   const currentYear = new Date().getFullYear();
   const [selectedYear, setSelectedYear] = useState<string>(ALL_YEARS_VALUE);
-  const [selectedQuarter, setSelectedQuarter] = useState<string>("");
+  const [selectedCounty, setSelectedCounty] = useState<string>(ALL_COUNTIES_VALUE);
+  const [quarterlyReportYear, setQuarterlyReportYear] = useState(String(currentYear));
   
   const availableYears = useMemo(() => {
     const years: string[] = [];
@@ -1992,6 +2369,25 @@ const PerformanceReport = () => {
     const parsed = parseInt(selectedYear, 10);
     return Number.isNaN(parsed) ? null : parsed;
   }, [selectedYear]);
+  const countyOptions = useMemo(() => {
+    const counties = new Map<string, string>();
+    const addCounty = (value: unknown) => {
+      const county = String(value || "").trim();
+      if (!county) return;
+      const key = normalizeCountyFilterValue(county);
+      if (key && !counties.has(key)) counties.set(key, county);
+    };
+
+    allFarmers.forEach((record) => addCounty(record.county));
+    trainingRecords.forEach((record) => addCounty(record.county));
+    animalHealthActivities.forEach((record) => addCounty(record.county));
+    offtakeRecords.forEach((record) => addCounty((record as any).county ?? (record as any).County));
+    hayStorageRecords.forEach((record) => addCounty(record.county || record.County));
+    fodderFarmersRecords.forEach((record) => addCounty(record.county));
+    boreholesRecords.forEach((record) => addCounty(record.county || record.County));
+
+    return Array.from(counties.values()).sort((left, right) => left.localeCompare(right));
+  }, [allFarmers, animalHealthActivities, boreholesRecords, fodderFarmersRecords, hayStorageRecords, offtakeRecords, trainingRecords]);
   const allowedProgrammeSet = useMemo(
     () =>
       userCanViewAllProgrammeData ?
@@ -2011,6 +2407,7 @@ const PerformanceReport = () => {
     activeProgram || null,
     selectedYearNum,
     userCanViewAllProgrammeData,
+    selectedCounty,
   );
   const projectManagerBreedsByLocationData = useMemo(
     () => buildLocationMetricSeries(data.breedsByLocationData),
@@ -2074,6 +2471,8 @@ const PerformanceReport = () => {
           cacheRef.current.animalHealth &&
           cacheRef.current.offtakes &&
           cacheRef.current.hayStorage &&
+          cacheRef.current.fodderFarmers &&
+          cacheRef.current.boreholes &&
           cacheRef.current.programmes === reportCacheKey &&
           (now - cacheRef.current.timestamp < CACHE_DURATION)) {
         farmersList = cacheRef.current.farmers;
@@ -2081,14 +2480,35 @@ const PerformanceReport = () => {
         animalHealthList = cacheRef.current.animalHealth;
         offtakeList = cacheRef.current.offtakes;
         setHayStorageRecords(cacheRef.current.hayStorage);
+        setFodderFarmersRecords(cacheRef.current.fodderFarmers);
+        setBoreholesRecords(cacheRef.current.boreholes);
       } else {
-        const batchResult = await fetchCollectionsBatch<Record<string, any>>([
-          { key: "farmers", path: "farmers", programmes: queryableProgrammes, options: reportFetchOptions },
-          { key: "training", path: "capacityBuilding", programmes: queryableProgrammes, options: reportFetchOptions },
-          { key: "animalHealth", path: "AnimalHealthActivities", programmes: queryableProgrammes, options: reportFetchOptions },
-          { key: "offtakes", path: "offtakes", programmes: queryableProgrammes, options: reportFetchOptions },
-          { key: "hayStorage", path: "HayStorage", programmes: queryableProgrammes, options: reportFetchOptions },
-        ]);
+        // NOTE: `boreholes` is intentionally NOT in the batch array. The batch
+        // function uses Promise.all internally, so a single rejection (e.g.
+        // permission-denied on the new `boreholes` collection) would throw
+        // the entire batch and abort fetchAllData. Instead, boreholes is
+        // fetched via the per-collection fallback path below, which uses
+        // Promise.allSettled — so its rejection is isolated and the rest of
+        // the dashboard still loads. Same goes for fodderFarmers (also a newer
+        // collection whose Firebase rules may not yet be deployed).
+        let batchResult: Record<string, any> = {};
+        try {
+          batchResult = await fetchCollectionsBatch<Record<string, any>>([
+            { key: "farmers", path: "farmers", programmes: queryableProgrammes, options: reportFetchOptions },
+            { key: "training", path: "capacityBuilding", programmes: queryableProgrammes, options: reportFetchOptions },
+            { key: "animalHealth", path: "AnimalHealthActivities", programmes: queryableProgrammes, options: reportFetchOptions },
+            { key: "offtakes", path: "offtakes", programmes: queryableProgrammes, options: reportFetchOptions },
+            { key: "hayStorage", path: "HayStorage", programmes: queryableProgrammes, options: reportFetchOptions },
+            { key: "fodderFarmers", path: "fodderFarmers", programmes: queryableProgrammes, options: reportFetchOptions },
+          ]);
+        } catch (batchError) {
+          // Batch failed (likely one collection rejected inside the batch's
+          // internal Promise.all). Fall through with an empty batchResult so
+          // every collection goes through its per-collection fallback below —
+          // Promise.allSettled will isolate any further rejections cleanly.
+          console.warn("Batch fetch failed, falling back to per-collection fetches", batchError);
+          batchResult = {};
+        }
 
         // Keep the existing per-collection fallback path. It protects the report
         // if the deployed batch function is missing or temporarily failing.
@@ -2098,35 +2518,71 @@ const PerformanceReport = () => {
           animalHealthResult,
           offtakeResult,
           hayStorageResult,
+          fodderFarmersResult,
+          boreholesResult,
         ] = await Promise.allSettled([
           Object.prototype.hasOwnProperty.call(batchResult, "farmers") ? Promise.resolve(batchResult.farmers as Farmer[]) : fetchReportCollection<Farmer>("farmers"),
           Object.prototype.hasOwnProperty.call(batchResult, "training") ? Promise.resolve(batchResult.training as TrainingRecord[]) : fetchReportCollection<TrainingRecord>("capacityBuilding"),
           Object.prototype.hasOwnProperty.call(batchResult, "animalHealth") ? Promise.resolve(batchResult.animalHealth as AnimalHealthRecord[]) : fetchReportCollection<AnimalHealthRecord>("AnimalHealthActivities"),
           Object.prototype.hasOwnProperty.call(batchResult, "offtakes") ? Promise.resolve(batchResult.offtakes as OfftakeRecord[]) : fetchReportCollection<OfftakeRecord>("offtakes"),
           Object.prototype.hasOwnProperty.call(batchResult, "hayStorage") ? Promise.resolve(batchResult.hayStorage) : fetchReportCollection<any>("HayStorage"),
+          Object.prototype.hasOwnProperty.call(batchResult, "fodderFarmers") ? Promise.resolve(batchResult.fodderFarmers as FodderFarmerRecord[]) : fetchReportCollection<FodderFarmerRecord>("fodderFarmers"),
+          // Boreholes is always fetched via the per-collection path (not the
+          // batch) because it's the newest collection and most likely to be
+          // missing Firebase read rules. Promise.allSettled isolates the
+          // rejection so the rest of the dashboard still loads.
+          // Borehole records are stored in BoreholeStorage and may be nested
+          // beneath programme keys, so query the collection root and flatten it.
+          get(ref(db, "BoreholeStorage")).then((snapshot) => flattenBoreholeStorage(snapshot.val())),
         ]);
 
-        const collectionsFailed =
+        // Core collections are the ones the whole dashboard is built around —
+        // farmers, training, animal-health, offtakes. If any of those fail we
+        // want the cache marked stale and the user notified, because the
+        // numbers on the cards will be wrong.
+        const coreCollectionsFailed =
           farmersResult.status === "rejected" ||
           trainingResult.status === "rejected" ||
           animalHealthResult.status === "rejected" ||
-          offtakeResult.status === "rejected" ||
-          hayStorageResult.status === "rejected";
+          offtakeResult.status === "rejected";
 
-        if (collectionsFailed) {
-          // Fall back to the last known-good cached data (if any) rather than blanking
-          // the dashboard, and let the user know only once, non-intrusively.
+        // Infrastructure collections (hay storage, fodder farmers, boreholes)
+        // are treated as optional. They're newer additions and may not yet
+        // have read rules in Firebase security rules — a permission-denied
+        // on one of them shouldn't break the rest of the dashboard or
+        // trigger an aggressive refetch loop. The empty-state fallbacks on
+        // the affected charts (e.g. "No borehole data found") handle the UX.
+        const infrastructureCollectionsFailed =
+          hayStorageResult.status === "rejected" ||
+          fodderFarmersResult.status === "rejected" ||
+          boreholesResult.status === "rejected";
+
+        if (coreCollectionsFailed) {
+          // Only the core failures surface a user-facing toast — infrastructure
+          // failures are logged quietly so missing read rules on a new
+          // collection don't pepper the user with "couldn't refresh" popups.
           console.error("Some performance report collections failed to load", {
             farmers: farmersResult.status === "rejected" ? farmersResult.reason : undefined,
             training: trainingResult.status === "rejected" ? trainingResult.reason : undefined,
             animalHealth: animalHealthResult.status === "rejected" ? animalHealthResult.reason : undefined,
             offtakes: offtakeResult.status === "rejected" ? offtakeResult.reason : undefined,
             hayStorage: hayStorageResult.status === "rejected" ? hayStorageResult.reason : undefined,
+            fodderFarmers: fodderFarmersResult.status === "rejected" ? fodderFarmersResult.reason : undefined,
+            boreholes: boreholesResult.status === "rejected" ? boreholesResult.reason : undefined,
           });
           toast({
             title: "Some data couldn't refresh",
             description: "Showing the most recent data we have. The report will try again automatically.",
             variant: "destructive",
+          });
+        } else if (infrastructureCollectionsFailed) {
+          // Quiet log only — these are typically "collection not in security
+          // rules yet" errors, not real failures. The affected chart will
+          // show its empty state.
+          console.warn("Optional infrastructure collections skipped (likely missing Firebase read rules)", {
+            hayStorage: hayStorageResult.status === "rejected" ? hayStorageResult.reason : undefined,
+            fodderFarmers: fodderFarmersResult.status === "rejected" ? fodderFarmersResult.reason : undefined,
+            boreholes: boreholesResult.status === "rejected" ? boreholesResult.reason : undefined,
           });
         }
 
@@ -2135,6 +2591,8 @@ const PerformanceReport = () => {
         const animalHealthRaw = animalHealthResult.status === "fulfilled" ? animalHealthResult.value : cacheRef.current.animalHealth ?? [];
         const offtakeRaw = offtakeResult.status === "fulfilled" ? offtakeResult.value : cacheRef.current.offtakes ?? [];
         const hayStorageRaw = hayStorageResult.status === "fulfilled" ? hayStorageResult.value : cacheRef.current.hayStorage ?? [];
+        const fodderFarmersRaw = fodderFarmersResult.status === "fulfilled" ? fodderFarmersResult.value : cacheRef.current.fodderFarmers ?? [];
+        const boreholesRaw = boreholesResult.status === "fulfilled" ? boreholesResult.value : cacheRef.current.boreholes ?? [];
 
         farmersList = farmersRaw.map((record) => ({
           ...record,
@@ -2184,14 +2642,21 @@ const PerformanceReport = () => {
           animalHealth: animalHealthList,
           offtakes: offtakeList,
           hayStorage: hayStorageRaw,
+          fodderFarmers: fodderFarmersRaw,
+          boreholes: boreholesRaw,
           programmes: reportCacheKey,
-          // Only mark the cache as "fresh" when every collection actually loaded.
-          // If something failed, keep the timestamp stale so the next fetch (manual
-          // refresh, tab focus, or remount) tries again instead of waiting out the
-          // full cache window on data we know is incomplete.
-          timestamp: collectionsFailed ? 0 : now,
+          // Only mark the cache as "fresh" when every CORE collection actually
+          // loaded. Infrastructure collection failures (hay storage, fodder
+          // farmers, boreholes — typically missing Firebase read rules) don't
+          // invalidate the cache, otherwise every tab focus would trigger a
+          // refetch storm against a collection that will keep rejecting.
+          // Core failures still mark the cache stale so the next visibility
+          // tick retries them automatically.
+          timestamp: coreCollectionsFailed ? 0 : now,
         };
         setHayStorageRecords(hayStorageRaw);
+        setFodderFarmersRecords(fodderFarmersRaw);
+        setBoreholesRecords(boreholesRaw);
       }
 
       setAllFarmers(farmersList);
@@ -2681,7 +3146,6 @@ const PerformanceReport = () => {
   const handleYearChange = useCallback((year: string) => {
     if (year === ALL_YEARS_VALUE) {
       setSelectedYear(ALL_YEARS_VALUE);
-      setSelectedQuarter("");
       setDateRange({
         startDate: "",
         endDate: "",
@@ -2692,7 +3156,6 @@ const PerformanceReport = () => {
     }
     const yearNum = parseInt(year, 10);
     setSelectedYear(year);
-    setSelectedQuarter("");
     setDateRange({ 
       startDate: `${yearNum}-01-01`, 
       endDate: `${yearNum}-12-31` 
@@ -2701,34 +3164,10 @@ const PerformanceReport = () => {
     setRegistrationTrendMode("auto");
   }, []);
 
-  // --- New Handler for Quarter Dropdown ---
-  const handleQuarterChange = useCallback((value: string) => {
-    setSelectedQuarter(value);
-    const parsedYear = parseInt(selectedYear, 10);
-    const yearNum = Number.isNaN(parsedYear) ? new Date().getFullYear() : parsedYear;
-    if (Number.isNaN(parsedYear)) {
-      setSelectedYear(String(yearNum));
-    }
-    if (value === 'q1') {
-      setDateRange(getQ1Dates(yearNum));
-      setTimeFrame('monthly');
-    } else if (value === 'q2') {
-      setDateRange(getQ2Dates(yearNum));
-      setTimeFrame('monthly');
-    } else if (value === 'q3') {
-      setDateRange(getQ3Dates(yearNum));
-      setTimeFrame('monthly');
-    } else if (value === 'q4') {
-      setDateRange(getQ4Dates(yearNum));
-      setTimeFrame('yearly');
-    }
-    setRegistrationTrendMode("auto");
-  }, [selectedYear]);
-
   // --- Updated Clear Filters ---
   const clearFilters = useCallback(() => {
     setSelectedYear(ALL_YEARS_VALUE);
-    setSelectedQuarter("");
+    setSelectedCounty(ALL_COUNTIES_VALUE);
     setDateRange({
       startDate: "",
       endDate: "",
@@ -2742,7 +3181,6 @@ const PerformanceReport = () => {
     setDateRange(dates);
     setTimeFrame('weekly');
     setSelectedYear(String(currentYear));
-    setSelectedQuarter("");
     setRegistrationTrendMode("auto");
   }, []);
 
@@ -2751,13 +3189,11 @@ const PerformanceReport = () => {
     setDateRange(dates);
     setTimeFrame('monthly');
     setSelectedYear(String(currentYear));
-    setSelectedQuarter("");
     setRegistrationTrendMode("auto");
   }, []);
 
   const setYearFilter = useCallback(() => {
     setSelectedYear(String(currentYear));
-    setSelectedQuarter("");
     setDateRange({
       startDate: `${currentYear}-01-01`,
       endDate: `${currentYear}-12-31`,
@@ -2777,11 +3213,11 @@ const PerformanceReport = () => {
       <text 
         x={x} 
         y={y} 
-        fill="white" 
+        fill="#111827" 
         textAnchor={x > cx ? 'start' : 'end'} 
         dominantBaseline="central"
         fontSize="10"
-        fontWeight="bold"
+        fontWeight="700"
       >
         {`${(percent * 100).toFixed(0)}%`}
       </text>
@@ -2811,20 +3247,300 @@ const PerformanceReport = () => {
     totalBalesSold,
     totalBalesBalance,
     totalRevenue,
+    averageRevenue,
   } = useMemo(() => {
     const harvested = hayStorageRecords.reduce((sum: number, r: any) => sum + (r.bales_harvested_stored || 0), 0);
     const purchased = hayStorageRecords.reduce((sum: number, r: any) => sum + (r.bales_purchased_stored || 0), 0);
     const sold = hayStorageRecords.reduce((sum: number, r: any) => sum + (r.bales_sold || 0), 0);
     const revenue = hayStorageRecords.reduce((sum: number, r: any) => sum + (r.revenue_generated || 0), 0);
+    const recordCount = hayStorageRecords.length;
+    // Average revenue per hay-storage record — what the revenue card under
+    // Infrastructure & Fodder Farmers now surfaces (instead of the lump sum,
+    // which lived on this card before).
+    const avgRevenue = recordCount > 0 ? Math.round(revenue / recordCount) : 0;
     return {
       totalBalesHarvested: harvested,
       totalBalesPurchased: purchased,
       totalBalesSold: sold,
       totalBalesBalance: harvested + purchased - sold,
       totalRevenue: revenue,
+      averageRevenue: avgRevenue,
     };
   }, [hayStorageRecords]);
 
+  // Aggregated fodder-farmer stats. Sourced ONLY from the `fodderFarmers`
+  // collection so livestock farmers (the `farmers` collection) don't leak
+  // into the Total Fodder Farmers count on the Infrastructure card.
+  // - Counts every individual farmer inside every record's `farmers[]` array.
+  // - Buckets per county (using the record's `county` field) so the doughnut
+  //   chart on the right of the trend row can render.
+  // - Buckets per year (using `date`/`timestamp`/`createdAt`) so the trend
+  //   chart on the left of the trend row mirrors the livestock farmer
+  //   "Farmers Registration Trend" card.
+  const fodderFarmersStats = useMemo(() => {
+    const filtered = fodderFarmersRecords.filter((record) => {
+      const recordDate = record.date || record.timestamp || record.createdAt;
+      return matchesProgrammeSelection(record.programme, activeProgram, userCanViewAllProgrammeData) &&
+        matchesCountySelection(record.county, selectedCounty) &&
+        isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
+    });
+
+    let totalFarmers = 0;
+    let maleFarmers = 0;
+    let femaleFarmers = 0;
+    const countyMap: Record<string, number> = {};
+    const yearMap: Record<number, number> = {};
+
+    filtered.forEach((record) => {
+      const farmers = Array.isArray(record.farmers) ? record.farmers : [];
+      const county = String(record.county || "Unknown").trim() || "Unknown";
+      const recordDate = parseDate(record.date || record.timestamp || record.createdAt);
+      const year = recordDate?.getFullYear() ?? null;
+
+      farmers.forEach((farmer) => {
+        const gender = String(farmer.gender || "").trim().toLowerCase();
+        if (gender === "male") maleFarmers += 1;
+        else if (gender === "female") femaleFarmers += 1;
+        totalFarmers += 1;
+        countyMap[county] = (countyMap[county] || 0) + 1;
+        if (year !== null) {
+          yearMap[year] = (yearMap[year] || 0) + 1;
+        }
+      });
+    });
+
+    const countyPerformanceData = Object.entries(countyMap)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+
+    // Mirror the livestock registration trend: always render the last 5 years
+    // (with zeroed buckets where there's no data) so the line chart's x-axis
+    // is stable regardless of filter state — same UX as the livestock chart.
+    const trendComparisonYears = Array.from({ length: 5 }, (_, index) => currentYear - 4 + index);
+    const registrationTrendData = trendComparisonYears.map((year) => ({
+      name: String(year),
+      registrations: yearMap[year] || 0,
+    }));
+
+    const malePercentage = totalFarmers > 0 ? ((maleFarmers / totalFarmers) * 100).toFixed(1) : "0.0";
+    const femalePercentage = totalFarmers > 0 ? ((femaleFarmers / totalFarmers) * 100).toFixed(1) : "0.0";
+
+    return {
+      totalFarmers,
+      maleFarmers,
+      femaleFarmers,
+      malePercentage,
+      femalePercentage,
+      countyPerformanceData,
+      registrationTrendData,
+    };
+  }, [fodderFarmersRecords, activeProgram, userCanViewAllProgrammeData, selectedCounty, dateRange.startDate, dateRange.endDate, currentYear]);
+
+  // Hay storage records grouped by storage facility. Each HayStorage row is one
+  // storage facility entry; we sum the bales stored (harvested + purchased)
+  // and balance remaining per facility, then sort by total stored desc so the
+  // horizontal list mirrors the "Vaccinated Animals per County" layout.
+  // The facility name is pulled defensively from any of several possible
+  // fields — `storage_facility`, `facility_name`, `storage_type`, `facility`,
+  // `site_name` — so the chart still renders if the collection's schema
+  // differs from what we assumed.
+  const storageFacilityBales = useMemo(() => {
+    const facilityMap: Record<string, { name: string; value: number; county: string; counties: Record<string, number> }> = {};
+
+    hayStorageRecords.forEach((r: any) => {
+      if (!matchesCountySelection(r.county || r.County, selectedCounty)) return;
+      const facilityName =
+        String(
+          r.storage_facility || r.storageFacility || r.facility_name ||
+          r.facilityName || r.storage_type || r.storageType ||
+          r.facility || r.site_name || r.siteName || r.location || "Unknown Facility",
+        ).trim() || "Unknown Facility";
+
+      const harvested = Number(r.bales_harvested_stored || 0);
+      const purchased = Number(r.bales_purchased_stored || 0);
+      const stored = harvested + purchased;
+      const county = String(r.county || r.County || "Unknown").trim() || "Unknown";
+
+      const current = facilityMap[facilityName] || { name: facilityName, value: 0, county, counties: {} };
+      current.value += stored;
+      current.counties[county] = (current.counties[county] || 0) + stored;
+      current.county = Object.entries(current.counties).sort((left, right) => right[1] - left[1])[0]?.[0] || county;
+      facilityMap[facilityName] = current;
+    });
+
+    return Object.values(facilityMap)
+      .map(({ name, value, county }) => ({ name, value, county }))
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 10);
+  }, [hayStorageRecords, selectedCounty]);
+
+  // Borehole count per county, plus per-county aggregates (people served,
+  // water used, drilled/equipped/maintained/rehabilitated counts, and the
+  // list of locations). The county is read defensively from `County` (the
+  // actual PascalCase field in Firebase) with a camelCase fallback. The
+  // PeopleUsingBorehole field is a string like "190 Households" — we parse
+  // the leading number out so we can sum household counts per county.
+  const boreholesByCounty = useMemo(() => {
+    const filtered = boreholesRecords.filter((record) => {
+      const recordDate = record.date || record.createdAt;
+      return matchesProgrammeSelection(record.programme, activeProgram, userCanViewAllProgrammeData) &&
+        matchesCountySelection(record.County || record.county, selectedCounty) &&
+        isDateInRange(recordDate, dateRange.startDate, dateRange.endDate);
+    });
+
+    type CountyAgg = {
+      name: string;
+      value: number;
+      locations: string[];
+      peopleServed: number;
+      waterUsed: number;
+      drilled: number;
+      equipped: number;
+      maintained: number;
+      rehabilitated: number;
+    };
+
+    const countyMap: Record<string, CountyAgg> = {};
+
+    filtered.forEach((record) => {
+      // PascalCase first — that's what the Firebase collection actually uses.
+      const county = String(record.County || record.county || "Unknown").trim() || "Unknown";
+      const location = String(record.BoreholeLocation || record.location || "Unknown").trim() || "Unknown";
+
+      // PeopleUsingBorehole is stored as a string like "190 Households".
+      // Pull the leading integer out so household counts can be summed per county.
+      const peopleStr = String(record.PeopleUsingBorehole ?? record.peopleUsingBorehole ?? "0");
+      const peopleMatch = peopleStr.match(/(\d+)/);
+      const peopleServed = peopleMatch ? parseInt(peopleMatch[1], 10) : 0;
+
+      const waterUsed = Number(record.WaterUsed ?? record.waterUsed ?? 0);
+
+      const current = countyMap[county] || {
+        name: county,
+        value: 0,
+        locations: [],
+        peopleServed: 0,
+        waterUsed: 0,
+        drilled: 0,
+        equipped: 0,
+        maintained: 0,
+        rehabilitated: 0,
+      };
+
+      current.value += 1;
+      if (location && !current.locations.includes(location)) {
+        current.locations.push(location);
+      }
+      current.peopleServed += peopleServed;
+      current.waterUsed += waterUsed;
+      if (record.drilled) current.drilled += 1;
+      if (record.equipped) current.equipped += 1;
+      if (record.maintained) current.maintained += 1;
+      if (record.rehabilitated) current.rehabilitated += 1;
+      countyMap[county] = current;
+    });
+
+    return Object.values(countyMap)
+      .map((agg) => ({
+        name: agg.name,
+        value: agg.value,
+        locations: agg.locations.join(", "),
+        peopleServed: agg.peopleServed,
+        waterUsed: agg.waterUsed,
+        drilled: agg.drilled,
+        equipped: agg.equipped,
+        maintained: agg.maintained,
+        rehabilitated: agg.rehabilitated,
+      }))
+      .sort((a, b) => b.value - a.value);
+  }, [boreholesRecords, activeProgram, userCanViewAllProgrammeData, selectedCounty, dateRange.startDate, dateRange.endDate]);
+
+    const formatFullValue = useCallback((val?: number | null) => {
+      const num = Number(val);
+      if (!Number.isFinite(num)) return "0";
+      const rounded = Math.round(num * 100) / 100;
+      return rounded.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }, []);
+  
+     const summaryGroups = useMemo<SummaryGroup[]>(() => {
+  const farmersEnrolledItems: SummaryItem[] = [
+    { label: "Total Farmers Enrolled", value: data.totalFarmers },
+    { label: "No of Male Farmers", value: data.maleFarmers, suffix: ` (${data.malePercentage}%)` },
+    { label: "No of Female Farmers", value: data.femaleFarmers, suffix: ` (${data.femalePercentage}%)` },
+    { label: "No of Adult Farmers", value: data.adultFarmers, suffix: ` (${data.adultFarmersPercentage}%)` },
+    { label: "No of Youth Farmers", value: data.youthFarmers, suffix: ` (${data.youthFarmersPercentage}%)` },
+  ];
+
+  const farmersTrainedItems: SummaryItem[] = [
+    { label: "Total Farmers Trained", value: data.totalTrainedFarmers },
+    { label: "No of Male Farmers", value: data.maleTrainedFarmers, suffix: ` (${data.maleTrainedPercentage}%)` },
+    { label: "No of Female Farmers", value: data.femaleTrainedFarmers, suffix: ` (${data.femaleTrainedPercentage}%)` },
+    { label: "No of Adult Farmers", value: data.adultTrainedFarmers, suffix: ` (${data.adultTrainedPercentage}%)` },
+    { label: "No of Youth Farmers", value: data.youthTrainedFarmers, suffix: ` (${data.youthTrainedPercentage}%)` },
+  ];
+
+  const animalHealthItems: SummaryItem[] = [
+    { label: "Total Animals", value: data.totalAnimals },
+    { label: "Total Locations Visited", value: data.totalLocationsVisited },
+    { label: "No of Goats", value: data.totalGoats, suffix: ` (${data.goatsPercentage}%)` },
+    { label: "No of Sheep", value: data.totalSheep, suffix: ` (${data.sheepPercentage}%)` },
+  ];
+
+  return [
+    { title: "Farmers Enrolled", items: sortZeroLast(farmersEnrolledItems) },
+    { title: "Farmers Trained", items: sortZeroLast(farmersTrainedItems) },
+    { title: "Animal Health", items: sortZeroLast(animalHealthItems) },
+  ];
+}, [data]);
+
+  const enrolledTrainingCoverage = data.totalFarmers > 0
+    ? Math.min(100, (data.totalTrainedFarmers / data.totalFarmers) * 100)
+    : 0;
+  const recordedLivestockCoverage = data.totalAnimals > 0
+    ? Math.min(100, ((data.totalGoats + data.totalSheep) / data.totalAnimals) * 100)
+    : 0;
+  const remainingLivestockCoverage = Math.max(0, 100 - recordedLivestockCoverage);
+
+  const quarterlyReport = useMemo(() => {
+    const year = Number(quarterlyReportYear);
+    const quarters = [
+      { label: "Q1", startMonth: 0 },
+      { label: "Q2", startMonth: 3 },
+      { label: "Q3", startMonth: 6 },
+      { label: "Q4", startMonth: 9 },
+    ];
+
+    return quarters.map(({ label, startMonth }) => {
+      const quarterStart = new Date(year, startMonth, 1);
+      const quarterEnd = new Date(year, startMonth + 3, 0, 23, 59, 59, 999);
+      const today = new Date();
+      const quarterFarmers = allFarmers.filter((farmer) => {
+        const date = parseDate(farmer.createdAt || farmer.registrationDate);
+        if (!date || date.getFullYear() !== year || date.getMonth() < startMonth || date.getMonth() >= startMonth + 3) {
+          return false;
+        }
+        return matchesProgrammeSelection(farmer.programme, activeProgram, userCanViewAllProgrammeData);
+      });
+      const maleFarmers = quarterFarmers.filter((farmer) => String(farmer.gender || "").trim().toLowerCase() === "male").length;
+      const femaleFarmers = quarterFarmers.filter((farmer) => String(farmer.gender || "").trim().toLowerCase() === "female").length;
+      const adults = quarterFarmers.filter((farmer) => classifyFarmerAgeGroup(farmer) === "adult").length;
+      const youths = quarterFarmers.filter((farmer) => classifyFarmerAgeGroup(farmer) === "youth").length;
+      const actual = quarterFarmers.length;
+      const progress = Math.min(100, Math.round((actual / QUARTERLY_FARMER_TARGET) * 100));
+
+      return {
+        label,
+        actual,
+        maleFarmers,
+        femaleFarmers,
+        adults,
+        youths,
+        progress,
+        status: quarterEnd < today ? "Completed" : quarterStart > today ? "Not Started" : "In Progress",
+      };
+    });
+  }, [activeProgram, allFarmers, quarterlyReportYear, userCanViewAllProgrammeData]);
+  
   if (loading && !USE_REMOTE_ANALYTICS) {
     return (
       <div className="flex flex-col justify-center items-center h-96 space-y-4">
@@ -2866,11 +3582,11 @@ const PerformanceReport = () => {
               <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
                 <div
                   ref={filterStripRef}
-                  className="w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+                  className="w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden lg:overflow-x-visible"
                 >
-                  <div className="flex min-w-max flex-nowrap items-center gap-2 p-1">
+                  <div className="flex min-w-max flex-nowrap items-center gap-2 p-1 lg:min-w-0 lg:w-full lg:flex-wrap lg:justify-between">
                     <Select value={selectedYear || undefined} onValueChange={handleYearChange}>
-                      <SelectTrigger className="h-9 w-[150px] shrink-0">
+                      <SelectTrigger className="h-9 w-[150px] shrink-0 lg:flex-1">
                         <div className="flex items-center gap-2">
                           <Calendar className="h-4 w-4 text-gray-500" />
                           <SelectValue placeholder="Select Year" />
@@ -2886,7 +3602,7 @@ const PerformanceReport = () => {
 
                     {showProgrammeFilter && (
                       <Select value={activeProgram} onValueChange={setActiveProgram}>
-                        <SelectTrigger className="h-9 w-[150px] shrink-0">
+                        <SelectTrigger className="h-9 w-[150px] shrink-0 lg:flex-1">
                           <SelectValue placeholder="Select Programme" />
                         </SelectTrigger>
                         <SelectContent>
@@ -2898,19 +3614,15 @@ const PerformanceReport = () => {
                       </Select>
                     )}
 
-                    <Select
-                      value={selectedQuarter || undefined}
-                      onValueChange={handleQuarterChange}
-                      disabled={selectedYear === ALL_YEARS_VALUE}
-                    >
-                      <SelectTrigger className="h-9 w-[150px] shrink-0">
-                        <SelectValue placeholder={selectedYear === ALL_YEARS_VALUE ? "Select Year First" : "Quarter"} />
+                    <Select value={selectedCounty} onValueChange={setSelectedCounty}>
+                      <SelectTrigger className="h-9 w-[150px] shrink-0 lg:flex-1">
+                        <SelectValue placeholder="Select County" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="q1">Q1 (Jan-Mar)</SelectItem>
-                        <SelectItem value="q2">Q2 (Jan-Jun)</SelectItem>
-                        <SelectItem value="q3">Q3 (Jan-Sep)</SelectItem>
-                        <SelectItem value="q4">Q4 (Full Year)</SelectItem>
+                        <SelectItem value={ALL_COUNTIES_VALUE}>All Counties</SelectItem>
+                        {countyOptions.map((county) => (
+                          <SelectItem key={county} value={county}>{county}</SelectItem>
+                        ))}
                       </SelectContent>
                     </Select>
 
@@ -2919,7 +3631,7 @@ const PerformanceReport = () => {
                       type="date"
                       value={dateRange.startDate}
                       onChange={(e) => handleDateRangeChange("startDate", e.target.value)}
-                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
+                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500 lg:flex-1"
                     />
 
                     <Input
@@ -2927,11 +3639,11 @@ const PerformanceReport = () => {
                       type="date"
                       value={dateRange.endDate}
                       onChange={(e) => handleDateRangeChange("endDate", e.target.value)}
-                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
+                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500 lg:flex-1"
                     />
 
-                    <Button variant="outline" onClick={setMonthFilter} size="sm" className="h-9 shrink-0">This Month</Button>
-                    <Button onClick={clearFilters} variant="ghost" size="sm" className="h-9 shrink-0 text-red-500 hover:text-red-600">Clear</Button>
+                    <Button variant="outline" onClick={setMonthFilter} size="sm" className="h-9 shrink-0 lg:flex-1">This Month</Button>
+                    <Button onClick={clearFilters} variant="ghost" size="sm" className="h-9 shrink-0 text-red-500 hover:text-red-600 lg:flex-1">Clear</Button>
                   </div>
                 </div>
               </div>
@@ -2950,13 +3662,6 @@ const PerformanceReport = () => {
           </CardContent>
         </Card>
       </div>
-
-      <DashboardInsights
-        accessibleProgrammes={accessibleProgrammes}
-        selectedProgramme={activeProgram}
-        title="Report Insights"
-        description="Dated insights shared from the performance dashboard overview."
-      />
 
       {hasSection("hr-summary") && (
         <section>
@@ -3038,10 +3743,10 @@ const PerformanceReport = () => {
               <CardHeader className="border-b border-slate-100 bg-slate-50/70 pb-3">
                 {reportAudience === "hr" && (
                   <div className="mb-3 flex flex-wrap justify-end gap-2">
-                    <Button variant="outline" size="sm" onClick={openCreateStaffDialog}>
+                    <Button size="sm" onClick={openCreateStaffDialog} className="bg-green-600 text-white hover:bg-green-700">
                       Create Staff
                     </Button>
-                    <Button variant="outline" size="sm" onClick={() => openAwardDialog(null)}>
+                    <Button size="sm" onClick={() => openAwardDialog(null)} className="bg-green-600 text-white hover:bg-green-700">
                       <Award className="mr-1 h-4 w-4" />
                       Award Marks
                     </Button>
@@ -3055,15 +3760,15 @@ const PerformanceReport = () => {
               <CardContent className="p-0">
                 <div className="max-h-[360px] overflow-auto">
                   <Table className="min-w-full">
-                    <TableHeader className="sticky top-0 z-10 bg-slate-50">
+                    <TableHeader className="sticky top-0 z-10 bg-green-600">
                       <TableRow>
-                        <TableHead className="py-2 text-xs">Staff</TableHead>
-                        <TableHead className="py-2 text-xs">County</TableHead>
-                        <TableHead className="py-2 text-xs">Role</TableHead>
-                        <TableHead className="py-2 text-xs">Status</TableHead>
-                        <TableHead className="py-2 text-xs">Total Marks</TableHead>
-                        <TableHead className="py-2 text-xs">Awards</TableHead>
-                        <TableHead className="py-2 text-xs text-right">Actions</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">Staff</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">County</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">Role</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">Status</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">Total Marks</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white">Awards</TableHead>
+                        <TableHead className="py-2 text-xs font-semibold text-white text-right">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -3098,9 +3803,9 @@ const PerformanceReport = () => {
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  className="h-9 w-9 rounded-full border border-slate-200 bg-white hover:bg-slate-100"
+                                  className="h-9 w-9 rounded-full border border-green-200 bg-green-50 hover:bg-green-100"
                                 >
-                                  <MoreVertical className="h-4 w-4 text-slate-600" />
+                                  <MoreVertical className="h-4 w-4 text-green-700" />
                                   <span className="sr-only">Open staff actions</span>
                                 </Button>
                               </DropdownMenuTrigger>
@@ -3311,7 +4016,7 @@ const PerformanceReport = () => {
             <p className="text-xs text-slate-500">
               Programme: <span className="font-semibold text-slate-700">{activeProgram || "No programme selected"}</span>
             </p>
-            <Button onClick={handleCreateStaff} disabled={isSavingStaffDirectory}>
+            <Button onClick={handleCreateStaff} disabled={isSavingStaffDirectory} className="bg-green-600 text-white hover:bg-green-700">
               {isSavingStaffDirectory ? "Saving..." : editingStaffRow ? "Save Changes" : "Create Staff"}
             </Button>
           </div>
@@ -3382,7 +4087,7 @@ const PerformanceReport = () => {
               <p className="text-xs text-slate-500">
                 Saving to: <span className="font-semibold text-slate-700">{activeProgram || "No programme selected"}</span>
               </p>
-              <Button onClick={handleStaffMarkSubmit} disabled={isSavingStaffMark}>
+              <Button onClick={handleStaffMarkSubmit} disabled={isSavingStaffMark} className="bg-green-600 text-white hover:bg-green-700">
                 {isSavingStaffMark ? "Saving..." : "Save Staff Marks"}
               </Button>
             </div>
@@ -3571,7 +4276,7 @@ const PerformanceReport = () => {
 
       {hasSection("default-registration") && (
       <section>
-        <SectionHeader title="Farmer Registration" />
+        <SectionHeader title="Livestock Farmer Registration" />
         
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <StatsCard 
@@ -3604,7 +4309,7 @@ const PerformanceReport = () => {
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                   <MapPin className="h-4 w-4 text-purple-600" />
-                  Registration Per County
+                  Registration (County)
                 </CardTitle>
               </CardHeader>
             <CardContent>
@@ -3637,7 +4342,7 @@ const PerformanceReport = () => {
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                   <MapPin className="h-4 w-4 text-cyan-600" />
-                  Registration Per Subcounty
+                  Registration (Subcounty)
                 </CardTitle>
               </CardHeader>
             <CardContent>
@@ -3649,7 +4354,7 @@ const PerformanceReport = () => {
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                   <MapPin className="h-4 w-4 text-green-600" />
-                  Registration Per Ward
+                  Registration (Ward)
                 </CardTitle>
               </CardHeader>
             <CardContent>
@@ -3664,13 +4369,17 @@ const PerformanceReport = () => {
               <div className="flex items-center justify-between gap-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                   <TrendingUp className="h-4 w-4 text-blue-600" />
-                  Farmers Registration Trend
+                  Farmers Registration vs Training Trend
                 </CardTitle>
                 <Button
                   type="button"
                   variant={registrationTrendMode === "yearly" ? "default" : "outline"}
                   size="sm"
-                  className="h-8 px-3 text-xs"
+                  className={
+                    registrationTrendMode === "yearly"
+                      ? "h-8 bg-green-600 px-3 text-xs text-white hover:bg-green-700"
+                      : "h-8 border-green-600 px-3 text-xs text-green-700 hover:bg-green-50"
+                  }
                   onClick={() =>
                     setRegistrationTrendMode((mode) => (mode === "yearly" ? "auto" : "yearly"))
                   }
@@ -3768,13 +4477,13 @@ const PerformanceReport = () => {
 
  {hasSection("default-animal-health") && (
       <section>
-        <SectionHeader title="Infrastructure" />
+        <SectionHeader title=" Infrastracture & Fodder Farmers" />
         <div className="grid gap-4 md:grid-cols-3 mb-6">
           <StatsCard 
             title="Total Fodder Farmers Registered" 
-            value={data.totalFarmers.toLocaleString()} 
+            value={fodderFarmersStats.totalFarmers.toLocaleString()} 
             icon={Users}
-            subtext="Across all programmes"
+            subtext={`${fodderFarmersStats.maleFarmers} Male (${fodderFarmersStats.malePercentage}%) | ${fodderFarmersStats.femaleFarmers} Female (${fodderFarmersStats.femalePercentage}%)`}
             color="blue"
           />
           <StatsCard 
@@ -3785,10 +4494,10 @@ const PerformanceReport = () => {
             color="green"
           />
           <StatsCard 
-            title="Revenue Generated" 
-            value={`KES ${totalRevenue.toLocaleString()}`}
+            title="Average Revenue Generated" 
+            value={`KES ${averageRevenue.toLocaleString()}`}
             icon={TrendingUp}
-            subtext="From hay sales"
+            subtext={`Total: KES ${totalRevenue.toLocaleString()} | Across ${hayStorageRecords.length} hay storage record${hayStorageRecords.length === 1 ? "" : "s"}`}
             color="orange"
           />
         </div>
@@ -3854,6 +4563,171 @@ const PerformanceReport = () => {
           </Card>
         </div>
 
+        {/* Fodder farmers registration trend (left) + registration per county doughnut (right) —
+            mirrors the layout/UX of the Livestock Farmer Registration section so
+            the two dashboards read consistently. The trend buckets registrations
+            per year (5-year window, same as the livestock chart) and the doughnut
+            shows the share of fodder farmers registered per county for the active
+            filters. */}
+        <div className="grid gap-6 md:grid-cols-2 mb-6">
+          <Card className="border-0 shadow-lg bg-white">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
+                <TrendingUp className="h-4 w-4 text-blue-600" />
+                Fodder Farmers Registration Trend
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <RegistrationTrendChart data={fodderFarmersStats.registrationTrendData} />
+            </CardContent>
+          </Card>
+
+          <Card className="border-0 shadow-lg bg-white">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
+                <MapPin className="h-4 w-4 text-purple-600" />
+                Fodder Farmers Registration (County)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {fodderFarmersStats.countyPerformanceData.length > 0 ? (
+                <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
+                  <PieChart>
+                    <Pie
+                      data={fodderFarmersStats.countyPerformanceData}
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                      innerRadius={REPORT_DONUT_INNER_RADIUS}
+                      paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                      cornerRadius={REPORT_DONUT_CORNER_RADIUS}
+                      dataKey="value"
+                      label={renderCustomizedLabel}
+                      labelLine={false}
+                    >
+                      {fodderFarmersStats.countyPerformanceData.map((entry, index) => (
+                        <Cell key={`fodder-county-${index}`} fill={BAR_COLORS[index % BAR_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip formatter={(value: number | string) => [Number(value).toLocaleString(), "Fodder Farmers"]} />
+                    <Legend verticalAlign="bottom" height={36} iconType="circle" />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-[280px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                  No fodder farmer registration data found for the selected filters.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Storage facilities with bales stored (left) — horizontal ranked list
+            styled exactly like "Vaccinated Animals per County". Each row is one
+            storage facility with a colored progress bar scaled against the
+            top facility. Hovering a row would show its bales balance, but the
+            list itself surfaces the stored total per facility at a glance. */}
+        <div className="grid gap-6 md:grid-cols-2 mb-6">
+          <Card className="border-0 bg-white shadow-lg">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm text-gray-800">
+                <Warehouse className="h-4 w-4 text-green-600" />
+                Storage Facilities &amp; Bales Stored
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[250px] overflow-y-auto pr-2">
+                <TopLocationsList locations={storageFacilityBales} unitLabel="bales" accent="green" />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Boreholes per County (right) — pie chart showing how boreholes are
+              distributed across counties. Hovering a slice reveals the county's
+              borehole count, total households served, water used, and
+              drilled/equipped/maintained/rehabilitated tallies — much richer
+              than the default "X Boreholes" tooltip. */}
+          <Card className="border-0 shadow-lg bg-white">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
+                <Droplets className="h-4 w-4 text-blue-600" />
+                Boreholes(County)
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {boreholesByCounty.length > 0 ? (
+                <ResponsiveContainer width="100%" height={REPORT_DONUT_HEIGHT}>
+                  <PieChart>
+                    <Pie
+                      data={boreholesByCounty}
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={REPORT_DONUT_OUTER_RADIUS}
+                      innerRadius={REPORT_DONUT_INNER_RADIUS}
+                      paddingAngle={REPORT_DONUT_PADDING_ANGLE}
+                      cornerRadius={REPORT_DONUT_CORNER_RADIUS}
+                      dataKey="value"
+                      label={renderCustomizedLabel}
+                      labelLine={false}
+                    >
+                      {boreholesByCounty.map((entry, index) => (
+                        <Cell key={`borehole-county-${index}`} fill={BAR_COLORS[index % BAR_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      content={({ active, payload }: any) => {
+                        if (!active || !payload || !payload.length) return null;
+                        const entry = payload[0].payload as {
+                          name: string;
+                          value: number;
+                          locations: string;
+                          peopleServed: number;
+                          waterUsed: number;
+                          drilled: number;
+                          equipped: number;
+                          maintained: number;
+                          rehabilitated: number;
+                        };
+                        return (
+                          <div
+                            style={{
+                              background: "#0f172a",
+                              borderRadius: 10,
+                              padding: "10px 14px",
+                              color: "#fff",
+                              fontSize: 12,
+                              lineHeight: 1.7,
+                              boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+                              maxWidth: 280,
+                            }}
+                          >
+                            <div style={{ fontWeight: 700, marginBottom: 4 }}>{entry.name}</div>
+                            <div>Boreholes: <strong>{entry.value}</strong></div>
+                            <div>Households served: <strong>{entry.peopleServed.toLocaleString()}</strong></div>
+                            <div>Water used: <strong>{entry.waterUsed.toLocaleString()}</strong></div>
+                            <div>Drilled: <strong>{entry.drilled}</strong> | Equipped: <strong>{entry.equipped}</strong></div>
+                            <div>Maintained: <strong>{entry.maintained}</strong> | Rehabilitated: <strong>{entry.rehabilitated}</strong></div>
+                            {entry.locations && (
+                              <div style={{ color: "#94a3b8", fontSize: 11, marginTop: 4 }}>
+                                Locations: {entry.locations}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }}
+                    />
+                    <Legend verticalAlign="bottom" height={36} iconType="circle" />
+                  </PieChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-[280px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+                  No borehole data found for the selected filters.
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+
        
       </section>
       )}
@@ -3864,13 +4738,31 @@ const PerformanceReport = () => {
         <SectionHeader title="Animal Health" />
 
         <div className="grid gap-4 md:grid-cols-3 mb-6">
-          <StatsCard 
-            title="Total Doses" 
-            value={data.totalDosesGivenOut.toLocaleString()} 
-            icon={MapPin}
-            subtext="Total vaccination doses administered"
-            color="purple"
-          />
+          <Card className="border-0 shadow-lg bg-white overflow-hidden">
+            <CardHeader className="pb-2 bg-gradient-to-r from-purple-50 to-white">
+              <CardTitle className="text-sm flex items-center gap-2 text-gray-700">
+                <MapPin className="h-4 w-4 text-purple-600" />
+                Doses Administered
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="pl-6 pb-4">
+              <div className="text-xl font-bold text-gray-900">{data.totalDosesGivenOut.toLocaleString()}</div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {data.vaccineDoseBreakdown.length > 0 ? (
+                  data.vaccineDoseBreakdown.map((vaccine) => (
+                    <Badge
+                      key={vaccine.name}
+                      className="border-green-200 bg-green-50 font-normal text-green-700 hover:bg-green-50"
+                    >
+                      {vaccine.name}: {Number(vaccine.value).toLocaleString()}
+                    </Badge>
+                  ))
+                ) : (
+                  <p className="text-[11px] font-medium text-gray-500">No vaccine types recorded</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
 
           <StatsCard 
             title="Breeds Distributed" 
@@ -3896,11 +4788,20 @@ const PerformanceReport = () => {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                 <Syringe className="h-4 w-4 text-red-600" />
-                Vaccinated Animals per County
+                Vaccinated Animals(County)
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <VaccinationAreaList data={data.vaccinationByCountyData} />
+              <div className="h-[250px] overflow-y-auto pr-2">
+                <TopLocationsList
+                  locations={data.vaccinationByCountyData.map((entry) => ({
+                    ...entry,
+                    county: entry.name,
+                  }))}
+                  unitLabel="animals"
+                  accent="green"
+                />
+              </div>
             </CardContent>
           </Card>
 
@@ -3908,7 +4809,7 @@ const PerformanceReport = () => {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                 <Syringe className="h-4 w-4 text-red-600" />
-                Vaccinated Animals per Subcounty
+                Vaccinated Animals(Subcounty)
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -3950,7 +4851,7 @@ const PerformanceReport = () => {
             <CardHeader className="pb-2">
               <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
                 <Award className="h-4 w-4 text-teal-600" />
-                Breeds Distribution per County
+                Breeds Distribution (County)
               </CardTitle>
             </CardHeader>
             <CardContent>
@@ -4001,8 +4902,271 @@ const PerformanceReport = () => {
         </div>
       </section>
       )}
+       <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
+        <Card className="border-0 shadow-lg bg-white rounded-2xl overflow-hidden">
+          <CardHeader className="pb-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-sm flex items-center gap-2 text-gray-800">
+                  <TargetIcon className="h-4 w-4 text-teal-600" />
+                  Quarterly Farmer Registration Report
+                </CardTitle>
+               
+              </div>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="quarterly-report-year" className="text-xs font-medium text-slate-600">Year</Label>
+                <Select value={quarterlyReportYear} onValueChange={setQuarterlyReportYear}>
+                  <SelectTrigger id="quarterly-report-year" className="h-9 w-[110px] bg-white">
+                    <SelectValue placeholder="Select year" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableYears.map((year) => <SelectItem key={year} value={year}>{year}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-green-600 hover:bg-green-600">
+                    {['Quarter', 'No. of Farmers', 'Male Farmers', 'Female Farmers', 'Adults', 'Youths', 'Progress (%)', 'Status'].map((heading) => (
+                      <TableHead key={heading} className="whitespace-nowrap px-4 py-3 text-xs font-semibold text-white">{heading}</TableHead>
+                    ))}
+                    <TableHead className="w-10 text-white" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {quarterlyReport.map((quarter, index) => (
+                    <TableRow key={quarter.label}>
+                      <TableCell className="px-4 py-4">
+                        <span className={`inline-flex min-w-12 justify-center rounded-full px-3 py-1 text-xs font-semibold ${index === 2 ? 'bg-emerald-600 text-white' : 'bg-emerald-50 text-emerald-800'}`}>{quarter.label}</span>
+                      </TableCell>
+                      <TableCell className="px-4 py-4 font-medium">{quarter.actual.toLocaleString()}</TableCell>
+                      <TableCell className="px-4 py-4">{quarter.maleFarmers.toLocaleString()}</TableCell>
+                      <TableCell className="px-4 py-4">{quarter.femaleFarmers.toLocaleString()}</TableCell>
+                      <TableCell className="px-4 py-4">{quarter.adults.toLocaleString()}</TableCell>
+                      <TableCell className="px-4 py-4">{quarter.youths.toLocaleString()}</TableCell>
+                      <TableCell className="px-4 py-4 font-semibold text-slate-700">{quarter.progress}%</TableCell>
+                      <TableCell className="px-4 py-4">
+                        <Badge className={quarter.status === "Completed" ? "border-0 bg-emerald-50 text-emerald-700" : quarter.status === "In Progress" ? "border-0 bg-blue-50 text-blue-700" : "border-0 bg-slate-100 text-slate-600"}>
+                          <span className={`mr-1.5 h-1.5 w-1.5 rounded-full ${quarter.status === "Completed" ? "bg-emerald-500" : quarter.status === "In Progress" ? "bg-blue-500" : "bg-slate-400"}`} />
+                          {quarter.status}
+                        </Badge>
+                      </TableCell>
+                     
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+      <section className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-blue-700">
+            Report Summary
+          </p>
+          <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">
+            Report Summary
+          </h2>
+          <p className="mt-1 text-sm text-slate-500">
+            A consolidated view of farmer participation, training reach, and livestock health activity.
+          </p>
+        </div>
 
+        <div className="grid gap-4 lg:grid-cols-2">
+          <Card className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
+            <CardContent className="border-l-4 border-blue-500 p-5">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-50">
+                  <Users className="h-4 w-4 text-slate-600" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Farmers & Training</h3>
+                  <p className="text-[11px] text-slate-500">Enrollment, demographics, and training reach</p>
+                </div>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-[1.25fr_1fr]">
+                <div className="rounded-xl bg-blue-50 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-blue-600">Total Farmers Enrolled</p>
+                  <p className="mt-1 text-2xl font-bold text-slate-900">{formatFullValue(data.totalFarmers)}</p>
+                  <div className="mt-4 space-y-2">
+                    <div>
+                      <div className="mb-1 flex justify-between text-[11px] font-semibold text-slate-700">
+                        <span>Male Farmers</span>
+                        <span>{data.malePercentage}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-blue-100">
+                        <div className="h-full rounded-full bg-blue-600" style={{ width: `${data.malePercentage}%` }} />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="mb-1 flex justify-between text-[11px] font-semibold text-slate-700">
+                        <span>Female Farmers</span>
+                        <span>{data.femalePercentage}%</span>
+                      </div>
+                      <div className="h-2 rounded-full bg-blue-100">
+                        <div className="h-full rounded-full bg-blue-300" style={{ width: `${data.femalePercentage}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-3">
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Male Farmers</p>
+                    <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(data.maleFarmers)}</p>
+                    <p className="text-[11px] font-semibold text-slate-500">({data.malePercentage}%)</p>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white p-3">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Female Farmers</p>
+                    <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(data.femaleFarmers)}</p>
+                    <p className="text-[11px] font-semibold text-slate-500">({data.femalePercentage}%)</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="my-5 border-t border-slate-200" />
+
+              <div className="mb-3 flex items-center gap-2">
+                <GraduationCap className="h-4 w-4 text-blue-600" />
+                <h4 className="text-sm font-bold text-slate-800">Farmers Trained</h4>
+              </div>
+              <div className="grid gap-3 md:grid-cols-[1.2fr_1fr_1fr]">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Total Trained</p>
+                  <p className="mt-1 text-2xl font-bold text-slate-900">{formatFullValue(data.totalTrainedFarmers)}</p>
+                  <div className="mt-3 flex justify-between text-[11px] font-semibold text-slate-600">
+                    <span>Coverage</span>
+                    <span className="text-blue-600">{enrolledTrainingCoverage.toFixed(1)}%</span>
+                  </div>
+                  <div className="mt-1 h-2 rounded-full bg-blue-100">
+                    <div className="h-full rounded-full bg-blue-600" style={{ width: `${enrolledTrainingCoverage}%` }} />
+                  </div>
+                  <p className="mt-2 text-[10px] text-slate-500">
+                    {formatFullValue(data.totalTrainedFarmers)} of {formatFullValue(data.totalFarmers)} enrolled
+                  </p>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Male</p>
+                    <p className="text-sm font-bold text-slate-900">{formatFullValue(data.maleTrainedFarmers)}</p>
+                    <p className="text-[11px] font-bold text-blue-600">{data.maleTrainedPercentage}%</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Adult</p>
+                    <p className="text-sm font-bold text-slate-900">{formatFullValue(data.adultTrainedFarmers)}</p>
+                    <p className="text-[11px] font-bold text-blue-600">{data.adultTrainedPercentage}%</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Female</p>
+                    <p className="text-sm font-bold text-slate-900">{formatFullValue(data.femaleTrainedFarmers)}</p>
+                    <p className="text-[11px] font-bold text-blue-600">{data.femaleTrainedPercentage}%</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Youth</p>
+                    <p className="text-sm font-bold text-slate-900">{formatFullValue(data.youthTrainedFarmers)}</p>
+                    <p className="text-[11px] font-bold text-blue-600">{data.youthTrainedPercentage}%</p>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
+            <CardContent className="border-l-4 border-teal-600 p-5">
+              <div className="mb-4 flex items-center gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-teal-50">
+                  <Syringe className="h-4 w-4 text-slate-600" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">Animal Health</h3>
+                  <p className="text-[11px] text-slate-500">Livestock reached through program activity</p>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-5">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700">Total Animals</p>
+                <p className="mt-1 text-3xl font-bold text-slate-900">{formatFullValue(data.totalAnimals)}</p>
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 bg-white p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700">Locations Visited</p>
+                  <p className="mt-1 text-xl font-bold text-slate-900">{formatFullValue(data.totalLocationsVisited)}</p>
+                  <p className="text-[11px] text-slate-500">Field activity locations</p>
+                </div>
+                <div className="rounded-xl bg-emerald-50 p-4">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-teal-700">Recorded Livestock</p>
+                  <p className="mt-1 text-xl font-bold text-slate-900">{recordedLivestockCoverage.toFixed(1)}%</p>
+                  <p className="text-[11px] text-slate-500">Goats and sheep combined</p>
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <div className="flex h-3 overflow-hidden rounded-full bg-slate-100">
+                  <div className="bg-teal-700" style={{ width: `${data.goatsPercentage}%` }} />
+                  <div className="bg-cyan-500" style={{ width: `${data.sheepPercentage}%` }} />
+                </div>
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full bg-teal-700" />
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Goats</p>
+                          <p className="text-[11px] text-slate-500">Livestock reached</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-slate-900">{formatFullValue(data.totalGoats)}</p>
+                        <p className="text-[11px] font-bold text-teal-700">{data.goatsPercentage}%</p>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full bg-cyan-500" />
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Sheep</p>
+                          <p className="text-[11px] text-slate-500">Livestock reached</p>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-sm font-bold text-slate-900">{formatFullValue(data.totalSheep)}</p>
+                        <p className="text-[11px] font-bold text-teal-700">{data.sheepPercentage}%</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <p className="mt-3 text-[11px] text-slate-500">
+                  Remaining {remainingLivestockCoverage.toFixed(1)}% covers other livestock species reached.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </section>
      
+
+      <DashboardInsights
+        allowAdd={userCanViewAllProgrammeData}
+        accessibleProgrammes={accessibleProgrammes}
+        selectedProgramme={activeProgram}
+        dateRange={dateRange}
+        title="Report Insights"
+        description="Dated insights shared from the performance dashboard overview."
+      />
+
     </div>
   );
 };

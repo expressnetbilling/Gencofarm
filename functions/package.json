@@ -3,10 +3,13 @@
   "private": true,
   "version": "1.0.0",
   "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
   "scripts": {
     "build": "tsc",
     "serve": "npm run build && npx firebase emulators:start --only functions",
-    "deploy": "npx firebase deploy -project genco-export",
+    "deploy": "npx firebase deploy --project genco-export",
     "logs": "npx firebase functions:log"
   },
   "dependencies": {

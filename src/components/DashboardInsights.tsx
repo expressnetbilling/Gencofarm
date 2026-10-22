@@ -82,6 +82,7 @@ type DashboardInsightsProps = {
   allowAdd?: boolean;
   accessibleProgrammes: readonly string[];
   selectedProgramme?: string | null;
+  dateRange?: { startDate?: string; endDate?: string } | null;
   title?: string;
   description?: string;
   className?: string;
@@ -98,6 +99,31 @@ const parseDateValue = (value: unknown): number => {
     return Number.isFinite(parsed) ? parsed : 0;
   }
   return 0;
+};
+
+const getCurrentMonthRange = () => {
+  const now = new Date();
+  return {
+    startDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth(), 1)),
+    endDate: formatDateToLocal(new Date(now.getFullYear(), now.getMonth() + 1, 0)),
+  };
+};
+
+const isDateWithinRange = (
+  value: unknown,
+  range?: { startDate?: string; endDate?: string } | null,
+): boolean => {
+  const effectiveRange = range?.startDate && range?.endDate ? range : getCurrentMonthRange();
+  const valueMs = parseDateValue(value);
+  const startMs = parseDateValue(effectiveRange.startDate);
+  const endMs = parseDateValue(effectiveRange.endDate);
+  if (!valueMs || !startMs || !endMs) return false;
+
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+  return valueMs >= start.getTime() && valueMs <= end.getTime();
 };
 
 const getFieldLabel = (field: unknown, fallback?: string): string => {
@@ -127,6 +153,7 @@ export function DashboardInsights({
   allowAdd = false,
   accessibleProgrammes,
   selectedProgramme,
+  dateRange,
   title = "Insights",
   description: _description,
   className,
@@ -154,8 +181,13 @@ export function DashboardInsights({
     return selected && visibleProgrammes.includes(selected) ? selected : visibleProgrammes[0] || "";
   }, [selectedProgramme, visibleProgrammes]);
 
+  const insightDateRange = useMemo(
+    () => (dateRange?.startDate && dateRange?.endDate ? dateRange : getCurrentMonthRange()),
+    [dateRange?.endDate, dateRange?.startDate],
+  );
+
   const insightsQuery = useQuery({
-    queryKey: ["dashboard-insights", visibleProgrammes.join("|")],
+    queryKey: ["dashboard-insights", visibleProgrammes.join("|"), insightDateRange.startDate, insightDateRange.endDate],
     queryFn: async () => {
       if (visibleProgrammes.length === 0) return [];
       const records = await fetchCollection<DashboardInsightRecord>(
@@ -171,7 +203,7 @@ export function DashboardInsights({
           fieldLabel: getFieldLabel(record.field, record.fieldLabel),
           icon: record.icon || "increase",
         }))
-        .filter((record) => record.insight)
+        .filter((record) => record.insight && isDateWithinRange(record.date, insightDateRange))
         .sort(
           (a, b) =>
             parseDateValue(b.date) - parseDateValue(a.date) ||
@@ -187,7 +219,7 @@ export function DashboardInsights({
 
   const openAddDialog = () => {
     setForm({
-      date: formatDateToLocal(new Date()),
+      date: insightDateRange.startDate || formatDateToLocal(new Date()),
       field: "farmers",
       icon: "increase",
       insight: "",
@@ -329,6 +361,8 @@ export function DashboardInsights({
                   id="insightDate"
                   type="date"
                   value={form.date}
+                  min={insightDateRange.startDate}
+                  max={insightDateRange.endDate}
                   onChange={(event) => setForm((prev) => ({ ...prev, date: event.target.value }))}
                 />
               </div>

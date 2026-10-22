@@ -43,26 +43,18 @@
 
 import * as admin from "firebase-admin";
 import { onRequest } from "firebase-functions/v2/https";
-import { defineSecret } from "firebase-functions/params";
+import { defineInt, defineString } from "firebase-functions/params";
 
 // ---------------------------------------------------------------------------
-// SMTP Configuration via Firebase Secrets
+// SMTP Configuration via Firebase environment parameters
 // ---------------------------------------------------------------------------
-// These are set via:
-//   firebase functions:secrets:set SMTP_HOST
-//   firebase functions:secrets:set SMTP_PORT
-//   firebase functions:secrets:set SMTP_USER
-//   firebase functions:secrets:set SMTP_PASS
-//   firebase functions:secrets:set SMTP_FROM
-//
-// Alternatively, set them as environment variables in the Firebase Console
-// under Cloud Functions configuration.
+// These are loaded from functions/.env during Firebase deployment.
 
-const smtpHost = defineSecret("SMTP_HOST");
-const smtpPort = defineSecret("SMTP_PORT");
-const smtpUser = defineSecret("SMTP_USER");
-const smtpPass = defineSecret("SMTP_PASS");
-const smtpFrom = defineSecret("SMTP_FROM");
+const smtpHost = defineString("SMTP_HOST");
+const smtpPort = defineInt("SMTP_PORT", { default: 587 });
+const smtpUser = defineString("SMTP_USER");
+const smtpPass = defineString("SMTP_PASS");
+const smtpFrom = defineString("SMTP_FROM");
 
 // ---------------------------------------------------------------------------
 // Request / Response Types
@@ -186,7 +178,6 @@ export const sendEmail = onRequest(
     // Uncomment and set if you need a minimum for cold-start latency:
     // minInstances: 0,
     region: "us-central1",
-    secrets: [smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom],
   },
   async (req, res) => {
     // ── CORS preflight ──
@@ -240,8 +231,8 @@ export const sendEmail = onRequest(
 
       const transporter = nodemailer.createTransport({
         host: smtpHost.value(),
-        port: parseInt(smtpPort.value(), 10) || 587,
-        secure: parseInt(smtpPort.value(), 10) === 465, // true for 465, false for 587
+        port: smtpPort.value(),
+        secure: smtpPort.value() === 465, // true for 465, false for 587
         auth: {
           user: smtpUser.value(),
           pass: smtpPass.value(),

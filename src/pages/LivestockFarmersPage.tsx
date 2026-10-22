@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, useTransition, useDeferredValue, ChangeEvent, memo } from "react";
+﻿import { useState, useEffect, useCallback, useMemo, useRef, useTransition, useDeferredValue, ChangeEvent, memo } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { db, ref, set, update, remove, push, fetchCollectionByProgrammes, subscribeCollectionByProgrammes, type DatabaseRecord } from "@/lib/firebase";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import {
   Download, Users, MapPin, Eye, Calendar, Scale, Phone,
   CreditCard, Edit, Trash2, ShieldCheck, Activity,
-  ChevronRight, Upload, GraduationCap
+  ChevronRight, Upload
 } from "lucide-react";
 import { useSharedProgrammeSelection } from "@/hooks/use-shared-programme-selection";
 import { useToast } from "@/hooks/use-toast";
@@ -50,6 +50,7 @@ interface FarmerData {
   phone: string;
   county: string;
   subcounty: string;
+  ward?: string;
   location: string;
   cattle: string | number;
   goats: number | GoatsData;
@@ -65,11 +66,26 @@ interface FarmerData {
   bucksServed?: string;
   femaleBreeds?: string;
   maleBreeds?: string;
-  tugNumber?: string;
   dewormed?: boolean;
   dewormingDate?: string;
   vaccinationDate?: string;
   acres?: number;
+  newBreedsMale?: string;
+  newBreedsFemale?: string;
+  tugNumberMale?: string;
+  tugNumberFemale?: string;
+  age?: number | string;
+  animalManager?: string;
+  householdRole?: string;
+  incomeControl?: string;
+  livestockInsurance?: string;
+  livestockOwnership?: string;
+  marketInformation?: string;
+  offtakerNegotiator?: string;
+  saleDecision?: string;
+  trainingInterest?: string;
+  registeringAs?: string;
+  groupName?: string;
 }
 
 interface TrainingData {
@@ -94,9 +110,11 @@ interface Filters {
   endDate: string;
   county: string;
   subcounty: string;
+  ward: string;
   gender: string;
   location: string;
   duplicateStatus: "unique" | "repeated" | "all";
+  breedsStatus: "all" | "withBreeds" | "withoutBreeds";
 }
 
 interface Stats {
@@ -108,7 +126,7 @@ interface Stats {
   vaccinatedCount: number;
   maleFarmers: number;
   femaleFarmers: number;
-  totalTrainedFarmers: number;
+  totalVisitedLocations: number;
 }
 
 interface Pagination {
@@ -136,7 +154,10 @@ interface EditForm {
   bucksServed: string;
   maleBreeds: string;
   femaleBreeds: string;
-  tugNumber: string;
+  newBreedsMale: string;
+  newBreedsFemale: string;
+  tugNumberMale: string;
+  tugNumberFemale: string;
 }
 
 const PAGE_LIMIT = 15;
@@ -263,6 +284,7 @@ const processFarmerRecord = (
     phone: item.phone || "",
     county: item.county || "",
     subcounty: item.subcounty || "",
+    ward: item.ward || item.Ward || "",
     location: item.location || item.subcounty || "",
     cattle: item.cattle || "0",
     goats: item.goats || 0,
@@ -281,11 +303,26 @@ const processFarmerRecord = (
     bucksServed: item.bucksServed || "0",
     femaleBreeds: item.femaleBreeds || "0",
     maleBreeds: item.maleBreeds || "0",
-    tugNumber: item.tugNumber || item.tagNumber || "",
     dewormed: !!item.dewormed,
     dewormingDate: item.dewormingDate || null,
     vaccinationDate: item.vaccinationDate || null,
     acres: getAcreTotal(item),
+    newBreedsMale: item.newBreedsMale || "0",
+    newBreedsFemale: item.newBreedsFemale || "0",
+    tugNumberMale: item.tugNumberMale || item.tagNumberMale || item.maleTagNumber || "",
+    tugNumberFemale: item.tugNumberFemale || item.tagNumberFemale || item.femaleTagNumber || "",
+    age: item.age ?? "",
+    animalManager: item.animalManager || "",
+    householdRole: item.householdRole || "",
+    incomeControl: item.incomeControl || "",
+    livestockInsurance: item.livestockInsurance || "",
+    livestockOwnership: item.livestockOwnership || "",
+    marketInformation: item.marketInformation || "",
+    offtakerNegotiator: item.offtakerNegotiator || "",
+    saleDecision: item.saleDecision || "",
+    trainingInterest: item.trainingInterest || "",
+    registeringAs: item.registeringAs || "",
+    groupName: item.groupName || "",
   };
 };
 
@@ -342,6 +379,25 @@ const getDuplicateKeyCounts = (records: FarmerData[]): Map<string, number> => {
     counts.set(key, (counts.get(key) || 0) + 1);
   });
   return counts;
+};
+
+// A farmer "has breeding data" if any breeding-related numeric field is
+// greater than zero, or either tag number field holds a usable value.
+const hasBreedingData = (record: FarmerData): boolean => {
+  const numericFields = [
+    record.bucksServed,
+    record.maleBreeds,
+    record.femaleBreeds,
+    record.newBreedsMale,
+    record.newBreedsFemale,
+  ];
+  const hasNumeric = numericFields.some((val) => {
+    const num = Number(val);
+    return Number.isFinite(num) && num > 0;
+  });
+  const hasTagNumber =
+    isUsableIdentityValue(record.tugNumberMale) || isUsableIdentityValue(record.tugNumberFemale);
+  return hasNumeric || hasTagNumber;
 };
 
 const processTrainingRecord = (
@@ -404,7 +460,7 @@ const matchesDateRange = (
   return true;
 };
 
-// subscribeWithCache was removed — all collections now use realtime
+// subscribeWithCache was removed â€” all collections now use realtime
 // subscribeCollectionByProgrammes() subscriptions for live updates.
 
 // =============================================================================
@@ -420,8 +476,11 @@ const applyFiltersAndDedupe = (
     if (!matchesDateRange(record.createdAt, filters.startDate, filters.endDate)) return false;
     if (filters.county !== "all" && record.county?.toLowerCase() !== filters.county.toLowerCase()) return false;
     if (filters.subcounty !== "all" && record.subcounty?.toLowerCase() !== filters.subcounty.toLowerCase()) return false;
+    if (filters.ward !== "all" && record.ward?.toLowerCase() !== filters.ward.toLowerCase()) return false;
     if (filters.location !== "all" && record.location?.toLowerCase() !== filters.location.toLowerCase()) return false;
     if (filters.gender !== "all" && record.gender?.toLowerCase() !== filters.gender.toLowerCase()) return false;
+    if (filters.breedsStatus === "withBreeds" && !hasBreedingData(record)) return false;
+    if (filters.breedsStatus === "withoutBreeds" && hasBreedingData(record)) return false;
     if (filters.search) {
       const searchTerm = filters.search.toLowerCase();
       const searchMatch = [
@@ -464,11 +523,15 @@ const computeStats = (
   const vaccinatedCount = filteredFarmers.filter((f) => f.vaccinated).length;
   const maleFarmers = filteredFarmers.filter((f) => f.gender?.toLowerCase() === "male").length;
   const femaleFarmers = filteredFarmers.filter((f) => f.gender?.toLowerCase() === "female").length;
-  const totalTrainedFarmers = filteredTraining.reduce((sum, t) => sum + (Number(t.totalFarmers) || 0), 0);
+  const totalVisitedLocations = new Set(
+    filteredFarmers
+      .map((f) => f.location?.trim().toLowerCase())
+      .filter((loc): loc is string => Boolean(loc))
+  ).size;
 
   return {
     totalFarmers, totalGoats, totalSheep, totalCattle, totalAcres,
-    vaccinatedCount, maleFarmers, femaleFarmers, totalTrainedFarmers,
+    vaccinatedCount, maleFarmers, femaleFarmers, totalVisitedLocations,
   };
 };
 
@@ -541,9 +604,11 @@ const LivestockFarmersPage = () => {
     endDate: currentMonthRange.endDate,
     county: "all",
     subcounty: "all",
+    ward: "all",
     gender: "all",
     location: "all",
     duplicateStatus: "all",
+    breedsStatus: "all",
   });
 
   const [pagination, setPagination] = useState<Pagination>({
@@ -558,7 +623,9 @@ const LivestockFarmersPage = () => {
     farmerId: "", name: "", gender: "", idNumber: "", phone: "",
     county: "", subcounty: "", location: "", cattle: 0, goats: 0, sheep: 0,
     vaccinated: false, programme: "",
-    bucksServed: "", maleBreeds: "", femaleBreeds: "", tugNumber: "",
+    bucksServed: "", maleBreeds: "", femaleBreeds: "",
+    newBreedsMale: "", newBreedsFemale: "",
+    tugNumberMale: "", tugNumberFemale: "",
   });
 
   const [isPending, startTransition] = useTransition();
@@ -594,7 +661,7 @@ const LivestockFarmersPage = () => {
   const deferredSearch = useDeferredValue(filters.search);
 
   // =========================================================================
-  // Farmers — realtime subscription
+  // Farmers â€” realtime subscription
   // =========================================================================
   useEffect(() => {
     let cancelled = false;
@@ -646,7 +713,7 @@ const LivestockFarmersPage = () => {
   }, [accessibleProgrammes, activeProgram, toast]);
 
   // =========================================================================
-  // Training records — realtime subscription
+  // Training records â€” realtime subscription
   // =========================================================================
   useEffect(() => {
     if (!activeProgram) {
@@ -731,18 +798,49 @@ const LivestockFarmersPage = () => {
     setSelectedRecords((prev) => prev.filter((id) => !deletedIds.has(id)));
   }, []);
 
+  // â”€â”€ Cascading location filter options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Counties are always drawn from the full dataset. Subcounties are scoped
+  // to farmers within the selected county (or all farmers when county is
+  // "all"). Wards are further scoped to the selected county AND subcounty,
+  // and locations are scoped to county + subcounty + ward, so each dropdown
+  // only ever shows options that actually exist beneath the level above it.
   const uniqueCounties = useMemo(
     () => [...new Set(allFarmers.map((f) => f.county).filter(Boolean))],
     [allFarmers]
   );
-  const uniqueSubcounties = useMemo(
-    () => [...new Set(allFarmers.map((f) => f.subcounty).filter(Boolean))],
-    [allFarmers]
-  );
-  const uniqueLocations = useMemo(
-    () => [...new Set(allFarmers.map((f) => f.location).filter(Boolean))],
-    [allFarmers]
-  );
+
+  const uniqueSubcounties = useMemo(() => {
+    const scoped = filters.county === "all"
+      ? allFarmers
+      : allFarmers.filter((f) => f.county?.toLowerCase() === filters.county.toLowerCase());
+    return [...new Set(scoped.map((f) => f.subcounty).filter(Boolean))];
+  }, [allFarmers, filters.county]);
+
+  const uniqueWards = useMemo(() => {
+    let scoped = allFarmers;
+    if (filters.county !== "all") {
+      scoped = scoped.filter((f) => f.county?.toLowerCase() === filters.county.toLowerCase());
+    }
+    if (filters.subcounty !== "all") {
+      scoped = scoped.filter((f) => f.subcounty?.toLowerCase() === filters.subcounty.toLowerCase());
+    }
+    return [...new Set(scoped.map((f) => f.ward).filter(Boolean))];
+  }, [allFarmers, filters.county, filters.subcounty]);
+
+  const uniqueLocations = useMemo(() => {
+    let scoped = allFarmers;
+    if (filters.county !== "all") {
+      scoped = scoped.filter((f) => f.county?.toLowerCase() === filters.county.toLowerCase());
+    }
+    if (filters.subcounty !== "all") {
+      scoped = scoped.filter((f) => f.subcounty?.toLowerCase() === filters.subcounty.toLowerCase());
+    }
+    if (filters.ward !== "all") {
+      scoped = scoped.filter((f) => f.ward?.toLowerCase() === filters.ward.toLowerCase());
+    }
+    return [...new Set(scoped.map((f) => f.location).filter(Boolean))];
+  }, [allFarmers, filters.county, filters.subcounty, filters.ward]);
+
   const uniqueGenders = useMemo(
     () => [...new Set(allFarmers.map((f) => f.gender).filter(Boolean))],
     [allFarmers]
@@ -756,8 +854,8 @@ const LivestockFarmersPage = () => {
     setActiveProgram(program);
     setFilters({
       search: "", startDate: currentMonthRange.startDate, endDate: currentMonthRange.endDate,
-      county: "all", subcounty: "all", gender: "all",
-      location: "all", duplicateStatus: "all",
+      county: "all", subcounty: "all", ward: "all", gender: "all",
+      location: "all", duplicateStatus: "all", breedsStatus: "all",
     });
     setSelectedRecords([]);
     setPagination((prev) => ({ ...prev, page: 1 }));
@@ -773,9 +871,25 @@ const LivestockFarmersPage = () => {
     }, 300);
   }, []);
 
+  // Changing county resets subcounty + ward + location (they cascade from
+  // it); changing subcounty resets ward + location; changing ward resets
+  // location. Every other filter behaves as before.
   const handleFilterChange = useCallback(<K extends keyof Filters>(key: K, value: Filters[K]) => {
     startTransition(() => {
-      setFilters((prev) => ({ ...prev, [key]: value }));
+      setFilters((prev) => {
+        const next = { ...prev, [key]: value };
+        if (key === "county") {
+          next.subcounty = "all";
+          next.ward = "all";
+          next.location = "all";
+        } else if (key === "subcounty") {
+          next.ward = "all";
+          next.location = "all";
+        } else if (key === "ward") {
+          next.location = "all";
+        }
+        return next;
+      });
       setPagination((prev) => ({ ...prev, page: 1 }));
     });
   }, []);
@@ -826,7 +940,10 @@ const LivestockFarmersPage = () => {
       bucksServed: (record.bucksServed ?? "").toString(),
       maleBreeds: (record.maleBreeds ?? "").toString(),
       femaleBreeds: (record.femaleBreeds ?? "").toString(),
-      tugNumber: (record.tugNumber ?? "").toString(),
+      newBreedsMale: (record.newBreedsMale ?? "").toString(),
+      newBreedsFemale: (record.newBreedsFemale ?? "").toString(),
+      tugNumberMale: (record.tugNumberMale ?? "").toString(),
+      tugNumberFemale: (record.tugNumberFemale ?? "").toString(),
     });
     setIsEditDialogOpen(true);
   }, [userIsAdmin]);
@@ -853,7 +970,9 @@ const LivestockFarmersPage = () => {
         cattle: Number(editForm.cattle), goats: Number(editForm.goats), sheep: Number(editForm.sheep),
         vaccinated: editForm.vaccinated, programme: editForm.programme,
         bucksServed: editForm.bucksServed, maleBreeds: editForm.maleBreeds,
-        femaleBreeds: editForm.femaleBreeds, tugNumber: editForm.tugNumber,
+        femaleBreeds: editForm.femaleBreeds,
+        newBreedsMale: editForm.newBreedsMale, newBreedsFemale: editForm.newBreedsFemale,
+        tugNumberMale: editForm.tugNumberMale, tugNumberFemale: editForm.tugNumberFemale,
       });
       toast({ title: "Success", description: "Farmer record updated" });
       setIsEditDialogOpen(false);
@@ -881,7 +1000,7 @@ const LivestockFarmersPage = () => {
     }
   };
 
-  // FIX #1 (line 1081): `update(ref(db, "/"), updates)` — ref() needs a path
+  // FIX #1 (line 1081): `update(ref(db, "/"), updates)` â€” ref() needs a path
   const handleDeleteMultiple = async () => {
     if (!requireAdmin()) return;
     if (selectedRecords.length === 0) return;
@@ -971,7 +1090,7 @@ const LivestockFarmersPage = () => {
     });
   };
 
-  // FIX #3: same push()/set() pattern as FIX #2 — await push() to resolve the
+  // FIX #3: same push()/set() pattern as FIX #2 â€” await push() to resolve the
   // generated key, then build the ref from that key before calling set().
   const handleUpload = async () => {
     if (!requireAdmin()) return;
@@ -1002,6 +1121,15 @@ const LivestockFarmersPage = () => {
             ...item,
             registrationDate: item.registrationDate || item.registration_date || item.registeredAt || item.date || "",
             createdAt: parsedDate ? parsedDate.getTime() : item.createdAt,
+            // Normalize alternate tag-number key spellings so breeding data
+            // saved under different JSON field names still lands correctly.
+            tugNumberMale: item.tugNumberMale ?? item.tagNumberMale ?? item.maleTagNumber ?? "",
+            tugNumberFemale: item.tugNumberFemale ?? item.tagNumberFemale ?? item.femaleTagNumber ?? "",
+            bucksServed: item.bucksServed ?? "",
+            maleBreeds: item.maleBreeds ?? "",
+            femaleBreeds: item.femaleBreeds ?? "",
+            newBreedsMale: item.newBreedsMale ?? "",
+            newBreedsFemale: item.newBreedsFemale ?? "",
           };
         });
       } else {
@@ -1016,6 +1144,15 @@ const LivestockFarmersPage = () => {
 
         const findIndex = (keys: string[]) =>
           headers.findIndex((h) => keys.some((k) => h.includes(k)));
+
+        // Matches a header only if it contains ALL of `include` and NONE of
+        // `exclude` â€” used for breeding fields whose plain-language column
+        // names ("Male Breeds", "New Breeds Male", "Tag Number Male") would
+        // otherwise collide with each other under simple substring matching.
+        const findIndexAllExcluding = (include: string[], exclude: string[] = []) =>
+          headers.findIndex(
+            (h) => include.every((k) => h.includes(k)) && !exclude.some((k) => h.includes(k))
+          );
 
         const idxName = findIndex(["farmer name", "name"]);
         const idxGender = findIndex(["gender"]);
@@ -1036,6 +1173,15 @@ const LivestockFarmersPage = () => {
         const idxAggregationGroup = findIndex(["aggregation group", "group"]);
         const idxVaccinationDate = findIndex(["vaccination date", "vaccine date", "vax date"]);
         const idxFieldOfficer = findIndex(["field officer", "officer", "officer name", "created by", "username"]);
+
+        // --- Breeding columns ---
+        const idxBucksServed = findIndex(["bucks served", "bucksserved", "bucks"]);
+        const idxNewBreedsMale = findIndexAllExcluding(["new", "male", "breed"]);
+        const idxNewBreedsFemale = findIndexAllExcluding(["new", "female", "breed"]);
+        const idxMaleBreeds = findIndexAllExcluding(["male", "breed"], ["new", "female"]);
+        const idxFemaleBreeds = findIndexAllExcluding(["female", "breed"], ["new", "male"]);
+        const idxTagNumberMale = findIndexAllExcluding(["tag", "male"], ["female"]);
+        const idxTagNumberFemale = findIndexAllExcluding(["tag", "female"], ["male"]);
 
         const idxGoatsTotal = findIndex([
           "goats", "goats total", "total goats", "no of goats",
@@ -1091,6 +1237,20 @@ const LivestockFarmersPage = () => {
           if (idxAggregationGroup !== -1) obj.aggregationGroup = valAt(values, idxAggregationGroup).trim();
           if (idxVaccinationDate !== -1) obj.vaccinationDate = valAt(values, idxVaccinationDate).trim();
           if (idxFieldOfficer !== -1) obj.username = valAt(values, idxFieldOfficer).trim();
+
+          // --- Breeding fields: parsed from the CSV and written onto the
+          // upload object so they actually reach the database. Previously
+          // these columns were never read, so bucksServed / maleBreeds /
+          // femaleBreeds / newBreedsMale / newBreedsFemale / tugNumberMale /
+          // tugNumberFemale were always saved as their processFarmerRecord
+          // defaults ("0" / "") regardless of what was in the file.
+          if (idxBucksServed !== -1) obj.bucksServed = valAt(values, idxBucksServed).trim();
+          if (idxMaleBreeds !== -1) obj.maleBreeds = valAt(values, idxMaleBreeds).trim();
+          if (idxFemaleBreeds !== -1) obj.femaleBreeds = valAt(values, idxFemaleBreeds).trim();
+          if (idxNewBreedsMale !== -1) obj.newBreedsMale = valAt(values, idxNewBreedsMale).trim();
+          if (idxNewBreedsFemale !== -1) obj.newBreedsFemale = valAt(values, idxNewBreedsFemale).trim();
+          if (idxTagNumberMale !== -1) obj.tugNumberMale = valAt(values, idxTagNumberMale).trim();
+          if (idxTagNumberFemale !== -1) obj.tugNumberFemale = valAt(values, idxTagNumberFemale).trim();
 
           const foundGoatsMale = idxGoatsMale > -1;
           const foundGoatsFemale = idxGoatsFemale > -1;
@@ -1184,8 +1344,13 @@ const LivestockFarmersPage = () => {
         "Vaccinated", "Traceability", "Vaccines",
         "Programme", "Field Officer", "Created By", "Registration Date",
         "Dewormed", "Deworming Date", "Vaccination Date",
-        "Aggregation Group", "Bucks Served", "Female Breeds", "Male Breeds", "Tag Number",
+        "Aggregation Group", "Bucks Served", "Female Breeds", "Male Breeds",
+        "New Breeds Female", "New Breeds Male", "Tag Number (Female)", "Tag Number (Male)",
         "Age 1-4", "Age 5-8", "Age 8+",
+        "Age", "Animal Manager", "Household Role", "Income Control",
+        "Livestock Insurance", "Livestock Ownership", "Market Information",
+        "Offtaker Negotiator", "Sale Decision", "Training Interest",
+        "Registration Type", "Group Name",
       ];
 
       const csvData = filteredFarmers.map((f) => [
@@ -1207,10 +1372,17 @@ const LivestockFarmersPage = () => {
         f.bucksServed || "",
         f.femaleBreeds || "",
         f.maleBreeds || "",
-        f.tugNumber || "",
+        f.newBreedsFemale || "",
+        f.newBreedsMale || "",
+        f.tugNumberFemale || "",
+        f.tugNumberMale || "",
         f.ageDistribution?.["1-4"] || "",
         f.ageDistribution?.["5-8"] || "",
         f.ageDistribution?.["8+"] || "",
+        f.age, f.animalManager, f.householdRole, f.incomeControl,
+        f.livestockInsurance, f.livestockOwnership, f.marketInformation,
+        f.offtakerNegotiator, f.saleDecision, f.trainingInterest,
+        f.registeringAs, f.groupName,
       ]);
 
       const dateColumns = new Set([19, 21, 22]);
@@ -1258,11 +1430,11 @@ const LivestockFarmersPage = () => {
             </div>
             <div className="text-xl font-bold text-gray-800">{value}</div>
           </div>
-          {maleCount !== undefined && femaleCount !== undefined ? (
+          {maleCount !== undefined && femaleCount !== undefined && (
             <div className="mt-3 flex items-center justify-between w-full bg-gray-50 text-xs">
               <div className="flex flex-row">
                 <span className="text-gray-500">Male</span>
-                <span className="font-bold text-blue-600 text-sm">
+                <span className="text-gray-700 text-sm">
                   {maleCount} |{" "}
                   <span className="text-gray-400 font-normal">
                     ({totalCount > 0 ? Math.round((maleCount / totalCount) * 100) : 0}%)
@@ -1272,7 +1444,7 @@ const LivestockFarmersPage = () => {
               <div className="h-8 w-[1px] bg-gray-100"></div>
               <div className="flex flex-row text-right">
                 <span className="text-gray-500">Female</span>
-                <span className="font-bold text-pink-600 text-sm">
+                <span className="text-gray-700 text-sm">
                   {femaleCount} |
                   <span className="text-gray-400 font-normal">
                     ({totalCount > 0 ? Math.round((femaleCount / totalCount) * 100) : 0}%)
@@ -1280,13 +1452,11 @@ const LivestockFarmersPage = () => {
                 </span>
               </div>
             </div>
-          ) : children ? (
-            children
-          ) : (
-            description && (
-              <p className="text-xs mt-2 bg-gray-50 px-2 py-1 rounded-md border border-slate-100">{description}</p>
-            )
           )}
+          {description && (
+            <p className="text-xs mt-2 bg-gray-50 px-2 py-1 rounded-md border border-slate-100">{description}</p>
+          )}
+          {children}
         </CardContent>
       </Card>
     )
@@ -1294,18 +1464,48 @@ const LivestockFarmersPage = () => {
 
   return (
     <div className="space-y-6 px-2 sm:px-4 md:px-0">
-      {/* ── Header ── */}
-      <div className="flex flex-col justify-between items-start gap-4">
-        <div className="w-full md:w-auto">
-          <h2 className="text-md font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-            Livestock Farmers
-          </h2>
-          <div className="flex items-center gap-2">
-            <div className="bg-blue-50 text-blue-700 border-blue-200 text-xs w-fit">
-              {activeProgram === ALL_PROGRAMMES_VALUE ? "ALL PROGRAMMES" : activeProgram || "No Access"} PROJECT
+      {/* â”€â”€ Header â”€â”€ */}
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="w-full md:w-auto">
+            <h2 className="text-md font-bold bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
+              Livestock Farmers
+            </h2>
+            <div className="flex items-center gap-2">
+              <div className="bg-green-50 text-green-700 border-green-200 text-xs w-fit">
+                {activeProgram === ALL_PROGRAMMES_VALUE ? "ALL PROGRAMMES" : activeProgram || "No Access"} PROJECT
+              </div>
+              {isPending && (
+                <span className="text-xs text-gray-400 animate-pulse">Updating...</span>
+              )}
             </div>
-            {isPending && (
-              <span className="text-xs text-gray-400 animate-pulse">Updating...</span>
+          </div>
+
+          {/* Bulk action buttons now live where the search input used to be */}
+          <div className="flex flex-row flex-wrap gap-2 items-center w-full md:w-auto justify-start md:justify-end">
+            {selectedRecords.length > 0 && userIsAdmin && (
+              <Button variant="destructive" size="sm" onClick={openBulkDeleteConfirm} disabled={deleteLoading} className="text-xs h-10">
+                <Trash2 className="h-4 w-4 mr-2" /> Delete ({selectedRecords.length})
+              </Button>
+            )}
+            {selectedRecords.length > 0 && (
+              <Button variant="outline" size="sm" onClick={openBulkSmsDialog} className="border-green-300 text-green-700 h-10 hover:bg-green-50">
+                <Phone className="h-4 w-4 mr-2" /> Send SMS ({selectedRecords.length})
+              </Button>
+            )}
+            {userIsAdmin && (
+              <>
+                <Button variant="outline" size="sm" onClick={() => setIsUploadDialogOpen(true)} className="border-green-300 text-green-700 h-10">
+                  <Upload className="h-4 w-4 mr-2" /> Upload
+                </Button>
+                <Button
+                  onClick={handleExport}
+                  disabled={exportLoading || filteredFarmers.length === 0}
+                  className="bg-green-600 text-white shadow-md hover:bg-green-700 text-xs h-10"
+                >
+                  <Download className="h-4 w-4 mr-2" /> Export ({filteredFarmers.length})
+                </Button>
+              </>
             )}
           </div>
         </div>
@@ -1345,7 +1545,8 @@ const LivestockFarmersPage = () => {
             )}
           </div>
 
-          <div className="flex flex-row xl:flex-row gap-2 items-center">
+          {/* Clear Filters + search input now share the filter-buttons row */}
+          <div className="flex flex-col md:flex-row lg:flex-row gap-2 items-center w-full md:w-auto">
             <Button
               variant="outline"
               size="sm"
@@ -1353,46 +1554,28 @@ const LivestockFarmersPage = () => {
                 startTransition(() => {
                   setFilters({
                     search: "", startDate: "", endDate: "",
-                    county: "all", subcounty: "all", gender: "all",
-                    location: "all", duplicateStatus: "all",
+                    county: "all", subcounty: "all", ward: "all", gender: "all",
+                    location: "all", duplicateStatus: "all", breedsStatus: "all",
                   });
                   setPagination((prev) => ({ ...prev, page: 1 }));
                 });
               }}
-              className="h-10 px-6 w-full xl:w-auto"
+              className="h-10 px-6 w-full md:w-auto"
             >
               Clear Filters
             </Button>
 
-            {selectedRecords.length > 0 && userIsAdmin && (
-              <Button variant="destructive" size="sm" onClick={openBulkDeleteConfirm} disabled={deleteLoading} className="text-xs h-10">
-                <Trash2 className="h-4 w-4 mr-2" /> Delete ({selectedRecords.length})
-              </Button>
-            )}
-            {selectedRecords.length > 0 && (
-              <Button variant="outline" size="sm" onClick={openBulkSmsDialog} className="border-green-300 text-green-700 h-10 hover:bg-green-50">
-                <Phone className="h-4 w-4 mr-2" /> Send SMS ({selectedRecords.length})
-              </Button>
-            )}
-            {userIsAdmin && (
-              <>
-                <Button variant="outline" size="sm" onClick={() => setIsUploadDialogOpen(true)} className="border-green-300 text-green-700 h-10">
-                  <Upload className="h-4 w-4 mr-2" /> Upload
-                </Button>
-                <Button
-                  onClick={handleExport}
-                  disabled={exportLoading || filteredFarmers.length === 0}
-                  className="bg-gradient-to-r from-blue-800 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md text-xs h-10"
-                >
-                  <Download className="h-4 w-4 mr-2" /> Export ({filteredFarmers.length})
-                </Button>
-              </>
-            )}
+            <Input
+              placeholder="Name, ID, Phone, Officer..."
+              defaultValue={filters.search}
+              onChange={(e) => handleSearchChange(e.target.value)}
+              className="border-gray-300 focus:border-blue-500 bg-white h-10 w-full md:w-72"
+            />
           </div>
         </div>
       </div>
 
-      {/* ── Stats Cards ── */}
+      {/* â”€â”€ Stats Cards â”€â”€ */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-4">
         <StatsCard
           title="FARMERS REGISTERED"
@@ -1412,7 +1595,7 @@ const LivestockFarmersPage = () => {
           <div className="flex items-center justify-between w-full mt-3 text-xs border-t border-gray-100 pt-2">
             <div className="flex flex-row text-left">
               <span className="text-gray-500 font-medium">Goats</span>
-              <span className="font-bold text-purple-600">
+              <span className="text-gray-700">
                 {stats.totalGoats} |
                 <span className="text-gray-400 font-normal ml-1">
                   {stats.totalSheep + stats.totalGoats > 0
@@ -1423,7 +1606,7 @@ const LivestockFarmersPage = () => {
             </div>
             <div className="flex flex-row text-right">
               <span className="text-gray-500 font-medium">Sheep</span>
-              <span className="font-bold text-indigo-600">
+              <span className="text-gray-700">
                 {stats.totalSheep} |
                 <span className="text-gray-400 font-normal ml-1">
                   {stats.totalSheep + stats.totalGoats > 0
@@ -1435,20 +1618,18 @@ const LivestockFarmersPage = () => {
           </div>
         </StatsCard>
         <StatsCard
-          title="TRAINED FARMERS"
-          value={stats.totalTrainedFarmers.toLocaleString()}
-          icon={GraduationCap}
+          title="VISITED LOCATIONS"
+          value={stats.totalVisitedLocations.toLocaleString()}
+          icon={MapPin}
           color="blue"
-          description="Participants in training sessions"
         />
       </div>
 
-      {/* ── Filters ── */}
+      {/* â”€â”€ Filters â”€â”€ */}
       <Card className="shadow-lg border-0 bg-white">
         <CardContent className="space-y-6 pt-6">
-          <ScrollableFilterBar ariaLabel="Livestock farmer filters" contentClassName="sm:grid-cols-2 lg:grid-cols-6">
+          <ScrollableFilterBar ariaLabel="Livestock farmer filters" contentClassName="sm:grid-cols-2 lg:grid-cols-7">
             <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">County</Label>
               <Select value={filters.county} onValueChange={(value) => handleFilterChange("county", value)}>
                 <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
                   <SelectValue placeholder="All Counties" />
@@ -1463,7 +1644,6 @@ const LivestockFarmersPage = () => {
             </div>
 
             <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">Subcounty</Label>
               <Select value={filters.subcounty} onValueChange={(value) => handleFilterChange("subcounty", value)}>
                 <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
                   <SelectValue placeholder="All Subcounties" />
@@ -1478,7 +1658,20 @@ const LivestockFarmersPage = () => {
             </div>
 
             <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">Location</Label>
+              <Select value={filters.ward} onValueChange={(value) => handleFilterChange("ward", value)}>
+                <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
+                  <SelectValue placeholder="All Wards" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Wards</SelectItem>
+                  {uniqueWards.map((ward) => (
+                    <SelectItem key={ward} value={ward}>{ward}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
               <Select value={filters.location} onValueChange={(value) => handleFilterChange("location", value)}>
                 <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
                   <SelectValue placeholder="All Locations" />
@@ -1493,7 +1686,6 @@ const LivestockFarmersPage = () => {
             </div>
 
             <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">Gender</Label>
               <Select value={filters.gender} onValueChange={(value) => handleFilterChange("gender", value)}>
                 <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
                   <SelectValue placeholder="All Genders" />
@@ -1508,7 +1700,6 @@ const LivestockFarmersPage = () => {
             </div>
 
             <div className="w-[210px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">Registration Repetition</Label>
               <Select value={filters.duplicateStatus} onValueChange={(value) => handleFilterChange("duplicateStatus", value as Filters["duplicateStatus"])}>
                 <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
                   <SelectValue placeholder="All Registrations" />
@@ -1521,20 +1712,24 @@ const LivestockFarmersPage = () => {
               </Select>
             </div>
 
-            <div className="w-[240px] shrink-0 space-y-2 sm:w-auto">
-              <Label className="font-semibold text-gray-700 text-xs uppercase">Search</Label>
-              <Input
-                placeholder="Name, ID, Phone, Officer..."
-                defaultValue={filters.search}
-                onChange={(e) => handleSearchChange(e.target.value)}
-                className="border-gray-300 focus:border-blue-500 bg-white h-9"
-              />
+            <div className="w-[210px] shrink-0 space-y-2 sm:w-auto">
+              <Select value={filters.breedsStatus} onValueChange={(value) => handleFilterChange("breedsStatus", value as Filters["breedsStatus"])}>
+                <SelectTrigger className="border-gray-300 focus:border-blue-500 bg-white h-9">
+                  <SelectValue placeholder="All Records" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Records</SelectItem>
+                  <SelectItem value="withBreeds">With Breeding Data</SelectItem>
+                  <SelectItem value="withoutBreeds">Without Breeding Data</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
+
           </ScrollableFilterBar>
         </CardContent>
       </Card>
 
-      {/* ── Table ── */}
+      {/* â”€â”€ Table â”€â”€ */}
       <Card className="shadow-lg border-0 bg-white">
         <CardContent className="p-0">
           {loading ? (
@@ -1551,33 +1746,33 @@ const LivestockFarmersPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-50 text-xs">
+                    <tr className="bg-green-100 text-xs">
                       <th className="py-3 px-3">
                         <Checkbox
                           checked={selectedRecords.length === currentPageRecords.length && currentPageRecords.length > 0}
                           onCheckedChange={handleSelectAll}
                         />
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Date</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Farmer Name</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Gender</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Phone</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700 hidden sm:table-cell">idNumber</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">County</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Subcounty</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Location</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Cattle</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Goats</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Sheep</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Vaccinated</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">PROJECT</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700 hidden sm:table-cell">Field Officer</th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">Actions</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Date</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Farmer Name</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Gender</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Phone</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 hidden sm:table-cell">idNumber</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">County</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Subcounty</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Location</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Cattle</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Goats</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Sheep</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Vaccinated</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">PROJECT</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 hidden sm:table-cell">Field Officer</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {currentPageRecords.map((record) => (
-                      <tr key={record.id} className="border-b hover:bg-blue-50 transition-colors group">
+                      <tr key={record.id} className="border-b hover:bg-green-50 transition-colors group">
                         <td className="py-2 px-3">
                           <Checkbox
                             checked={selectedRecords.includes(record.id)}
@@ -1603,7 +1798,7 @@ const LivestockFarmersPage = () => {
                           )}
                         </td>
                         <td className="py-2 px-3">
-                          <Badge variant="outline" className="border-blue-200 text-blue-700 text-[10px]">
+                          <Badge variant="outline" className="border-green-200 text-green-700 text-[10px]">
                             {record.programme || activeProgram}
                           </Badge>
                         </td>
@@ -1616,7 +1811,7 @@ const LivestockFarmersPage = () => {
                             </Button>
                             {userIsAdmin && (
                               <>
-                                <Button variant="ghost" size="icon" className="h-7 w-7 text-blue-600 hover:bg-blue-50"
+                                <Button variant="ghost" size="icon" className="h-7 w-7 text-green-700 hover:bg-green-50"
                                   onClick={() => openEditDialog(record)}>
                                   <Edit className="h-3.5 w-3.5" />
                                 </Button>
@@ -1652,116 +1847,42 @@ const LivestockFarmersPage = () => {
         </CardContent>
       </Card>
 
-      {/* ── View Dialog ── */}
+      {/* View Dialog */}
       <Dialog open={isViewDialogOpen} onOpenChange={setIsViewDialogOpen}>
-        <DialogContent className="sm:max-w-3xl bg-white rounded-2xl max-h-[90vh] overflow-y-auto w-[95vw] sm:w-full">
-          <DialogHeader>
-            <DialogTitle>Farmer Profile Details</DialogTitle>
-            <DialogDescription>Complete information for {viewingRecord?.name}</DialogDescription>
-          </DialogHeader>
+        <DialogContent className="sm:max-w-6xl bg-slate-100 p-3 sm:p-5 rounded-2xl max-h-[96vh] overflow-y-auto w-[98vw]">
           {viewingRecord && (
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 py-4">
-              <div className="col-span-1 sm:col-span-2 bg-blue-50 p-4 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div className="flex items-center gap-4">
-                  <div className="bg-blue-100 p-3 rounded-full"><Users className="h-6 w-6 text-blue-600" /></div>
-                  <div>
-                    <h3 className="font-bold text-lg">{viewingRecord.name}</h3>
-                    <p className="text-sm text-gray-600">{viewingRecord.idNumber || "N/A"} &bull; {viewingRecord.programme}</p>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <p className="text-xs text-gray-500 uppercase font-bold">Created By</p>
-                  <p className="text-sm font-medium">{viewingRecord.username}</p>
-                </div>
+            <div className="space-y-3 text-slate-800">
+              <DialogHeader className="px-2 pt-1">
+                <DialogTitle className="text-xl font-semibold text-emerald-700 flex items-center gap-2"><Users className="h-5 w-5" /> Customer Profile Details</DialogTitle>
+                <DialogDescription>Complete information for {viewingRecord.name}</DialogDescription>
+              </DialogHeader>
+              <div className="rounded-xl border border-emerald-100 bg-gradient-to-r from-emerald-50 to-white p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-4"><div className="rounded-full bg-emerald-100 p-3 text-emerald-700"><Users className="h-7 w-7" /></div><div><h3 className="text-lg font-bold text-emerald-800">{viewingRecord.name}</h3><p className="text-sm text-slate-500">{viewingRecord.idNumber || "N/A"} <span className="px-2">•</span> {viewingRecord.programme}</p></div></div>
               </div>
-              <DetailRow label="County" value={viewingRecord.county} />
-              <DetailRow label="Subcounty" value={viewingRecord.subcounty} />
-              <DetailRow label="Location" value={viewingRecord.location} />
-              <DetailRow label="Phone" value={viewingRecord.phone} />
-              <DetailRow label="Gender" value={viewingRecord.gender} />
-              <DetailRow label="ID Number" value={viewingRecord.idNumber || "N/A"} />
-              <DetailRow label="Registration Date" value={viewingRecord.registrationDate} />
-              <div className="col-span-1 sm:col-span-2 border-t pt-4 mt-2">
-                <h4 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                  <Scale className="h-4 w-4" />Livestock Ownership
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
-                  <div className="bg-gray-50 p-4 rounded text-center border">
-                    <span className="block font-bold text-2xl text-orange-600">{viewingRecord.cattle}</span>
-                    <span className="text-xs text-gray-500 uppercase">Cattle</span>
-                  </div>
-                  <div className="bg-gray-50 p-4 rounded text-center border">
-                    <span className="block font-bold text-2xl text-green-600">{getGoatTotal(viewingRecord.goats)}</span>
-                    <span className="text-xs text-gray-500 uppercase">Goats</span>
-                  </div>
-                  <div className="bg-gray-50 p-4 rounded text-center border">
-                    <span className="block font-bold text-2xl text-purple-600">{viewingRecord.sheep}</span>
-                    <span className="text-xs text-gray-500 uppercase">Sheep</span>
-                  </div>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 items-stretch gap-3">
+                  <div className="grid content-start grid-cols-1 gap-x-4 rounded-lg border border-sky-100 p-3 sm:grid-cols-2"><ProfileRow label="Full Name" value={viewingRecord.name} /><ProfileRow label="National ID" value={viewingRecord.idNumber} /><ProfileRow label="Phone" value={viewingRecord.phone} /><ProfileRow label="Member Number" value={viewingRecord.farmerId} /><ProfileRow label="Registration Type" value={viewingRecord.registeringAs} /><ProfileRow label="Livestock Ownership" value={viewingRecord.livestockOwnership} /><ProfileRow label="Gender" value={viewingRecord.gender} /><ProfileRow label="Age" value={viewingRecord.age} /></div>
+                  <div className="grid content-start grid-cols-1 gap-x-4 rounded-lg border border-sky-100 p-3 sm:grid-cols-2"><ProfileRow label="Animal Manager" value={viewingRecord.animalManager} /><ProfileRow label="Income Control" value={viewingRecord.incomeControl} /><ProfileRow label="Sale Decision" value={viewingRecord.saleDecision} /><ProfileRow label="Offtaker Negotiator" value={viewingRecord.offtakerNegotiator} /><ProfileRow label="Market Information Source" value={viewingRecord.marketInformation} /><ProfileRow label="Field Officer" value={viewingRecord.username} /><ProfileRow label="Household Role" value={viewingRecord.householdRole} /><ProfileRow label="Livestock Insurance" value={viewingRecord.livestockInsurance} /></div>
+                  <div className="grid content-start grid-cols-1 gap-x-4 rounded-lg border border-sky-100 p-3 sm:grid-cols-2"><ProfileRow label="County" value={viewingRecord.county} /><ProfileRow label="Subcounty" value={viewingRecord.subcounty} /><ProfileRow label="Ward" value={viewingRecord.ward} /><ProfileRow label="Location" value={viewingRecord.location} /><ProfileRow label="Registration Date" value={viewingRecord.registrationDate} /><ProfileRow label="Training Interest" value={viewingRecord.trainingInterest} /><ProfileRow label="Group Name" value={viewingRecord.groupName} /><ProfileRow label="Aggregation Group" value={viewingRecord.aggregationGroup} /></div>
                 </div>
-              </div>
-              <div className="col-span-1 sm:col-span-2 border-t pt-4">
-                <h4 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
-                  <Activity className="h-4 w-4" />Health Status
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="p-4 border rounded flex items-center justify-between">
-                    <div>
-                      <p className="text-xs text-gray-500 font-bold uppercase">Vaccinated</p>
-                      <p className="font-medium">{viewingRecord.vaccinated ? "Yes" : "No"}</p>
-                    </div>
-                    <ShieldCheck className={`h-5 w-5 ${viewingRecord.vaccinated ? "text-green-600" : "text-gray-300"}`} />
-                  </div>
-                  {viewingRecord.vaccinationDate && (
-                    <div className="p-4 border rounded">
-                      <p className="text-xs text-gray-500 font-bold uppercase">Vaccination Date</p>
-                      <p className="font-medium">{viewingRecord.vaccinationDate}</p>
-                    </div>
-                  )}
-                  <div className="p-4 border rounded flex items-center justify-between">
-                    <div>
-                      <p className="text-xs text-gray-500 font-bold uppercase">Dewormed</p>
-                      <p className="font-medium">{viewingRecord.dewormed ? "Yes" : "No"}</p>
-                    </div>
-                    <ShieldCheck className={`h-5 w-5 ${viewingRecord.dewormed ? "text-blue-600" : "text-gray-300"}`} />
-                  </div>
-                  {viewingRecord.dewormingDate && (
-                    <div className="p-4 border rounded">
-                      <p className="text-xs text-gray-500 font-bold uppercase">Deworming Date</p>
-                      <p className="font-medium">{viewingRecord.dewormingDate}</p>
-                    </div>
-                  )}
-                </div>
-              </div>
-              <div className="col-span-1 sm:col-span-2 border-t pt-4">
-                <h4 className="font-semibold text-gray-700 mb-2 flex items-center gap-2">
-                  <Scale className="h-4 w-4" />Breeding
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <DetailRow label="Bucks Served" value={viewingRecord.bucksServed || "N/A"} />
-                  <DetailRow label="Male Breeds" value={viewingRecord.maleBreeds || "N/A"} />
-                  <DetailRow label="Female Breeds" value={viewingRecord.femaleBreeds || "N/A"} />
-                  <DetailRow label="Tag Number" value={viewingRecord.tugNumber || "N/A"} />
-                </div>
-              </div>
-              <div className="col-span-1 sm:col-span-2 border-t pt-4">
-                <div className="p-4 border rounded flex items-center gap-3">
-                  <Activity className={`h-5 w-5 ${viewingRecord.traceability ? "text-blue-600" : "text-gray-300"}`} />
-                  <div>
-                    <p className="text-xs text-gray-500 font-bold uppercase">Traceability</p>
-                    <p className="font-medium">{viewingRecord.traceability ? "Enabled" : "Disabled"}</p>
-                  </div>
-                </div>
-              </div>
+              </section>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4"><h4 className="mb-3 font-semibold text-emerald-700 flex items-center gap-2"><Scale className="h-5 w-5" />Livestock Ownership</h4><div className="grid grid-cols-2 sm:grid-cols-4 gap-3">{[{ label: "Cattle", value: viewingRecord.cattle }, { label: "Goats", value: getGoatTotal(viewingRecord.goats) }, { label: "Sheep", value: viewingRecord.sheep }, { label: "Male Goats", value: typeof viewingRecord.goats === "object" && viewingRecord.goats ? viewingRecord.goats.male ?? 0 : "N/A" }, { label: "Female Goats", value: typeof viewingRecord.goats === "object" && viewingRecord.goats ? viewingRecord.goats.female ?? 0 : "N/A" }].map((animal) => <div key={animal.label} className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-3 text-center"><Scale className="mx-auto h-5 w-5 text-emerald-700" /><p className="mt-1 text-2xl font-bold text-emerald-700">{animal.value}</p><p className="text-xs uppercase tracking-wide text-slate-500">{animal.label}</p></div>)}</div></section>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4"><h4 className="mb-3 font-semibold text-emerald-700 flex items-center gap-2"><Users className="h-5 w-5" />Animals Age Distribution</h4><div className="grid grid-cols-3 divide-x divide-emerald-100">{[{ label: "Goat Ages 1–4", value: viewingRecord.ageDistribution?.["1-4"] }, { label: "Goat Ages 5–8", value: viewingRecord.ageDistribution?.["5-8"] }, { label: "Goat Ages 8+", value: viewingRecord.ageDistribution?.["8+"] }].map((age) => <div key={age.label} className="px-3"><p className="text-xs uppercase text-slate-500">{age.label}</p><p className="mt-1 text-lg font-semibold">{age.value ?? "N/A"}</p></div>)}</div></section>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4"><h4 className="mb-3 font-semibold text-emerald-700 flex items-center gap-2"><Activity className="h-5 w-5" />Health Status</h4><div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{[{ label: "Vaccinated", value: viewingRecord.vaccinated ? "Yes" : "No" }, { label: "Dewormed", value: viewingRecord.dewormed ? "Yes" : "No" }, { label: "Vaccination Date", value: viewingRecord.vaccinationDate }, { label: "Deworming Date", value: viewingRecord.dewormingDate }, { label: "Vaccines", value: viewingRecord.vaccines.join(", ") }].map((health) => <div key={health.label} className="flex items-center gap-3 rounded-lg border border-sky-100 p-3"><ShieldCheck className="h-5 w-5 text-emerald-700" /><div><p className="text-xs uppercase text-slate-500">{health.label}</p><p className="font-medium">{health.value || "N/A"}</p></div></div>)}</div></section>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4"><h4 className="mb-3 font-semibold text-emerald-700 flex items-center gap-2"><Scale className="h-5 w-5" />Breeding</h4><div className="grid grid-cols-2 lg:grid-cols-4 gap-3">{[{ label: "Bucks Served", value: viewingRecord.bucksServed }, { label: "Male Breeds", value: viewingRecord.maleBreeds }, { label: "Female Breeds", value: viewingRecord.femaleBreeds }, { label: "New Breeds (Male)", value: viewingRecord.newBreedsMale }, { label: "New Breeds (Female)", value: viewingRecord.newBreedsFemale }, { label: "Tag Number (Male)", value: viewingRecord.tugNumberMale }, { label: "Tag Number (Female)", value: viewingRecord.tugNumberFemale }].map((breed) => <div key={breed.label} className="border-r border-emerald-100 px-2"><p className="text-xs uppercase text-slate-500">{breed.label}</p><p className="mt-1 font-medium">{breed.value || "N/A"}</p></div>)}</div></section>
+
+              <section className="rounded-xl border border-sky-100 bg-white p-3 sm:p-4"><h4 className="mb-3 font-semibold text-emerald-700 flex items-center gap-2"><Activity className="h-5 w-5" />Traceability</h4><div className="rounded-lg border border-emerald-100 bg-emerald-50/40 p-3"><p className="text-xs uppercase text-slate-500">Traceability</p><p className="font-medium">{viewingRecord.traceability ? "Enrolled" : "Not enrolled"}</p></div></section>
+              <DialogFooter className="sticky bottom-0 bg-slate-100 py-2"><Button onClick={() => setIsViewDialogOpen(false)} className="bg-emerald-700 hover:bg-emerald-800">Close</Button></DialogFooter>
             </div>
           )}
-          <DialogFooter>
-            <Button onClick={() => setIsViewDialogOpen(false)}>Close</Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* ── Edit Dialog ── */}
+      {/* â”€â”€ Edit Dialog â”€â”€ */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="sm:max-w-2xl bg-white rounded-2xl w-[95vw] sm:w-full max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>Edit Farmer Details</DialogTitle></DialogHeader>
@@ -1835,8 +1956,20 @@ const LivestockFarmersPage = () => {
               <Input type="number" value={editForm.femaleBreeds} onChange={(e) => setEditForm({ ...editForm, femaleBreeds: e.target.value })} />
             </div>
             <div className="space-y-2">
-              <Label>Tag Number</Label>
-              <Input value={editForm.tugNumber} onChange={(e) => setEditForm({ ...editForm, tugNumber: e.target.value })} />
+              <Label>New Breeds (Male)</Label>
+              <Input type="number" value={editForm.newBreedsMale} onChange={(e) => setEditForm({ ...editForm, newBreedsMale: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>New Breeds (Female)</Label>
+              <Input type="number" value={editForm.newBreedsFemale} onChange={(e) => setEditForm({ ...editForm, newBreedsFemale: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>Tag Number (Male Breeds)</Label>
+              <Input value={editForm.tugNumberMale} onChange={(e) => setEditForm({ ...editForm, tugNumberMale: e.target.value })} />
+            </div>
+            <div className="space-y-2">
+              <Label>Tag Number (Female Breeds)</Label>
+              <Input value={editForm.tugNumberFemale} onChange={(e) => setEditForm({ ...editForm, tugNumberFemale: e.target.value })} />
             </div>
             <div className="col-span-1 sm:col-span-2 my-2 border-t pt-2">
               <h4 className="text-sm font-semibold text-gray-500 uppercase">Status & PROJECT</h4>
@@ -1859,12 +1992,12 @@ const LivestockFarmersPage = () => {
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>Cancel</Button>
-            <Button onClick={handleEditSubmit} className="bg-blue-600 hover:bg-blue-700">Save Changes</Button>
+            <Button onClick={handleEditSubmit} className="bg-green-600 hover:bg-green-700 text-white">Save Changes</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* ── Upload Dialog ── */}
+      {/* â”€â”€ Upload Dialog â”€â”€ */}
       <Dialog open={isUploadDialogOpen} onOpenChange={(open) => {
         if (!uploadLoading) {
           setIsUploadDialogOpen(open);
@@ -1936,7 +2069,7 @@ const LivestockFarmersPage = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Single Delete Dialog ── */}
+      {/* â”€â”€ Single Delete Dialog â”€â”€ */}
       <Dialog open={isSingleDeleteDialogOpen} onOpenChange={setIsSingleDeleteDialogOpen}>
         <DialogContent className="sm:max-w-md w-[95vw] sm:w-full">
           <DialogHeader><DialogTitle>Confirm Deletion</DialogTitle></DialogHeader>
@@ -1948,7 +2081,7 @@ const LivestockFarmersPage = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Bulk Delete Dialog ── */}
+      {/* â”€â”€ Bulk Delete Dialog â”€â”€ */}
       <Dialog open={isDeleteConfirmOpen} onOpenChange={setIsDeleteConfirmOpen}>
         <DialogContent className="sm:max-w-md w-[95vw] sm:w-full">
           <DialogHeader><DialogTitle>Bulk Delete</DialogTitle></DialogHeader>
@@ -1960,7 +2093,7 @@ const LivestockFarmersPage = () => {
         </DialogContent>
       </Dialog>
 
-      {/* ── Bulk SMS Dialog ── */}
+      {/* â”€â”€ Bulk SMS Dialog â”€â”€ */}
       <Dialog
         open={isBulkSmsDialogOpen}
         onOpenChange={(open) => {
@@ -1997,6 +2130,13 @@ const LivestockFarmersPage = () => {
   );
 };
 
+const ProfileRow = ({ label, value }: { label: string; value: unknown }) => (
+  <div className="min-w-0 border-b border-sky-100 py-2 last:border-0">
+    <p className="text-xs leading-4 text-slate-500">{label}</p>
+    <p className="break-words text-sm font-medium leading-5 text-slate-800">{value === null || value === undefined || value === "" ? "N/A" : String(value)}</p>
+  </div>
+);
+
 const DetailRow = ({ label, value }: { label: string; value: string }) => (
   <div className="flex flex-col">
     <span className="text-xs text-gray-500 font-bold uppercase">{label}</span>
@@ -2005,3 +2145,7 @@ const DetailRow = ({ label, value }: { label: string; value: string }) => (
 );
 
 export default LivestockFarmersPage;
+
+
+
+

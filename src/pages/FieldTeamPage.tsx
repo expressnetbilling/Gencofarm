@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   CalendarDays,
+  CheckCircle2,
   Clock,
   Edit,
   Eye,
   FileCheck2,
   Loader2,
+  MapPin,
   MoreHorizontal,
   RefreshCw,
   Save,
@@ -153,6 +156,7 @@ const REPORT_ID_BY_PROGRAMME: Record<string, string> = {
   RANGE: "RANGE",
   "KPMD 2": "KPMD2",
 };
+const SUBMITTED_REPORTS_PAGE_SIZE = 10;
 
 // FIX: same set of possible field names CapacityBuildingPage.tsx checks
 // (getRecordPdfUrl) when it looks for an attached validation document PDF
@@ -367,6 +371,24 @@ const formatExactTime = (value: number | undefined): string => {
     minute: "2-digit",
     second: "2-digit",
   });
+};
+
+const getInitials = (name: string): string => {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "NA";
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase() || "").join("");
+};
+
+const getLocationParts = (location?: string) => {
+  const parts = String(location || "Missing")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return {
+    primary: parts[0] || "Missing",
+    secondary: parts.slice(1).join(", ") || "No location detail",
+    missing: !location || String(location).trim().toLowerCase() === "missing",
+  };
 };
 
 const formatDate = (value: number | string | undefined): string => {
@@ -714,6 +736,7 @@ const FieldTeamPage = () => {
   // used to compute a new report above.
   const [reportsFilterFromDate, setReportsFilterFromDate] = useState("");
   const [reportsFilterToDate, setReportsFilterToDate] = useState("");
+  const [submittedReportsPage, setSubmittedReportsPage] = useState(1);
 
   const permissionPrincipal = useMemo(
     () => resolvePermissionPrincipal(userRole, userAttribute),
@@ -884,6 +907,23 @@ const FieldTeamPage = () => {
       return reportTime >= rangeStart && reportTime <= rangeEnd;
     });
   }, [submittedReports, reportsFilterFromDate, reportsFilterToDate]);
+
+  const submittedReportsTotalPages = Math.max(1, Math.ceil(dateFilteredReports.length / SUBMITTED_REPORTS_PAGE_SIZE));
+  const paginatedSubmittedReports = useMemo(() => {
+    const safePage = Math.min(submittedReportsPage, submittedReportsTotalPages);
+    const startIndex = (safePage - 1) * SUBMITTED_REPORTS_PAGE_SIZE;
+    return dateFilteredReports.slice(startIndex, startIndex + SUBMITTED_REPORTS_PAGE_SIZE);
+  }, [dateFilteredReports, submittedReportsPage, submittedReportsTotalPages]);
+
+  useEffect(() => {
+    setSubmittedReportsPage(1);
+  }, [reportsFilterFromDate, reportsFilterToDate, submittedReports.length]);
+
+  useEffect(() => {
+    if (submittedReportsPage > submittedReportsTotalPages) {
+      setSubmittedReportsPage(submittedReportsTotalPages);
+    }
+  }, [submittedReportsPage, submittedReportsTotalPages]);
 
   const loadReports = async () => {
     const records = await fetchCollection<FieldTeamReport>(FIELD_TEAM_PATH, { noDateFilter: true, limit: 1000 });
@@ -1262,43 +1302,61 @@ const FieldTeamPage = () => {
     );
   }
 
-  // Table used both for the "Computed Field Officer Records" preview and
-  // inside the "View" dialog. Tightened vertical padding + widened
-  // horizontal padding per design feedback so rows read as compact but
-  // not cramped, with no cell text wrapping into a paragraph.
   const ReportRowsTable = ({ records }: { records: SavedFieldOfficerRow[] }) => (
-    <div className="overflow-x-auto rounded-lg border border-slate-200">
-      <table className="w-full text-sm">
-        <thead>
-          <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase text-slate-500">
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Field officer</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Farmers registered</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Latest registered</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Location</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Registered at</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">No of Training</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Trained Farmers</th>
-            <th className="whitespace-nowrap px-6 py-2 text-[9px] font-medium">Validation Doc</th>
-          </tr>
-        </thead>
-        <tbody>
-          {records.map((record, index) => (
-            <tr key={`${record.fieldOfficerName}-${index}`} className="border-b border-slate-100 last:border-b-0">
-              <td className="whitespace-nowrap px-6 py-1.5 font-medium text-slate-800">{record.fieldOfficerName}</td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">
+    <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="min-w-[980px] divide-y divide-slate-100">
+        {records.map((record, index) => {
+          const location = getLocationParts(record.latestFarmerLocation);
+          const hasLatestFarmer = Boolean(record.latestFarmerRegistered && record.latestFarmerRegistered.trim());
+          const rowIsMissing = !hasLatestFarmer || location.missing || !record.validationDocumentSubmitted;
+          return (
+            <div
+              key={`${record.fieldOfficerName}-${index}`}
+              className={`grid grid-cols-[240px_80px_180px_180px_72px_190px_170px] items-center gap-4 px-4 py-4 text-sm ${
+                rowIsMissing ? "bg-green-50/60" : "bg-white"
+              }`}
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-green-100 text-xs font-bold text-green-700">
+                  {getInitials(record.fieldOfficerName)}
+                </div>
+                <div className="min-w-0">
+                  <p className="truncate font-semibold text-slate-900">{record.fieldOfficerName}</p>
+                  <p className="text-xs text-slate-500">Active officer</p>
+                </div>
+              </div>
+
+              <div className="text-center text-sm font-bold text-green-600">
                 {record.totalLivestockFarmersRegistered.toLocaleString()}
-              </td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.latestFarmerRegistered || "N/A"}</td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.latestFarmerLocation || "N/A"}</td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">
-                <span className="flex items-center gap-1">
-                  <Clock className="h-3 w-3 text-slate-400" />
-                  {formatExactTime(record.latestFarmerRegisteredAt)}
-                </span>
-              </td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.numberOfTraining.toLocaleString()}</td>
-              <td className="whitespace-nowrap px-6 py-1.5 text-slate-700">{record.numberOfFarmersTrained.toLocaleString()}</td>
-              <td className="whitespace-nowrap px-6 py-1.5">
+              </div>
+
+              <div className="min-w-0">
+                {hasLatestFarmer ? (
+                  <>
+                    <p className="truncate font-semibold text-slate-800">{record.latestFarmerRegistered}</p>
+                    <p className="truncate text-xs text-slate-500">{formatExactTime(record.latestFarmerRegisteredAt)}</p>
+                  </>
+                ) : (
+                  <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+                    <AlertTriangle className="mr-1 h-3 w-3" />
+                    No last farmer
+                  </Badge>
+                )}
+              </div>
+
+              <div className="min-w-0">
+                <div className={`flex items-center gap-1 font-semibold ${location.missing ? "text-red-500" : "text-slate-800"}`}>
+                  <MapPin className="h-4 w-4 text-green-600" />
+                  <span className="truncate">{location.primary}</span>
+                </div>
+                <p className="truncate pl-5 text-xs text-slate-500">{location.secondary}</p>
+              </div>
+
+              <div className="text-center text-base font-bold text-slate-800">
+                {record.numberOfTraining.toLocaleString()}
+              </div>
+
+              <div>
                 <Badge
                   variant="outline"
                   className={
@@ -1307,13 +1365,27 @@ const FieldTeamPage = () => {
                       : "border-red-200 bg-red-50 text-red-700"
                   }
                 >
-                  {record.validationDocumentSubmitted ? "Submitted" : "Not submitted"}
+                  {record.validationDocumentSubmitted ? (
+                    <CheckCircle2 className="mr-1 h-3 w-3" />
+                  ) : (
+                    <AlertTriangle className="mr-1 h-3 w-3" />
+                  )}
+                  {record.validationDocumentSubmitted ? "Submitted" : "Document Required"}
                 </Badge>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+              </div>
+
+              <div className="min-w-0">
+                <Badge variant="outline" className="border-blue-200 bg-blue-50 text-blue-700">
+                  On Time
+                </Badge>
+                <p className="mt-1 truncate text-xs text-slate-500">
+                  {record.numberOfFarmersTrained.toLocaleString()} trained farmers
+                </p>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 
@@ -1484,9 +1556,9 @@ const FieldTeamPage = () => {
         <CardHeader className="space-y-3">
           <CardTitle className="flex items-center gap-2 text-slate-900">
             {userIsHr ? (
-              <ShieldCheck className="h-5 w-5 text-blue-600" />
+              <ShieldCheck className="h-5 w-5 text-green-600" />
             ) : (
-              <Users className="h-5 w-5 text-blue-600" />
+              <Users className="h-5 w-5 text-green-600" />
             )}
            <p className="text-sm font-semibold">Submitted Field Team Reports</p>
           </CardTitle>
@@ -1514,18 +1586,18 @@ const FieldTeamPage = () => {
             <div className="overflow-x-auto rounded-lg border border-slate-200">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-left text-xs uppercase text-slate-500">
-                    <th className="px-5 py-2 font-medium text-[10px]">Date</th>
-                    <th className="px-5 py-2 font-medium text-[10px]">Report ID</th>
-                    <th className="px-5 py-2 font-medium text-[10px]">Submitted by</th>
+                  <tr className="border-b border-green-200 bg-green-100 text-left text-xs uppercase text-green-900">
+                    <th className="px-5 py-2 font-medium text-[10px] text-green-900">Date</th>
+                    <th className="px-5 py-2 font-medium text-[10px] text-green-900">Report ID</th>
+                    <th className="px-5 py-2 font-medium text-[10px] text-green-900">Submitted by</th>
                     {userCanViewReportMeta && (
-                      <th className="px-5 py-2 font-medium text-[10px]">Status</th>
+                      <th className="px-5 py-2 font-medium text-[10px] text-green-900">Status</th>
                     )}
-                    <th className="px-5 py-2 font-medium text-[10px]">Actions</th>
+                    <th className="px-5 py-2 font-medium text-[10px] text-green-900">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dateFilteredReports.map((report) => (
+                  {paginatedSubmittedReports.map((report) => (
                     <tr key={report.id} className="border-b border-slate-100 last:border-b-0">
                       <td className="px-5 py-1.5 text-slate-800">
                         {formatDate(report.reportDate)}
@@ -1585,6 +1657,32 @@ const FieldTeamPage = () => {
                   ))}
                 </tbody>
               </table>
+              <div className="flex flex-col gap-3 border-t border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-xs text-slate-500">
+                  Showing {paginatedSubmittedReports.length.toLocaleString()} of {dateFilteredReports.length.toLocaleString()} reports
+                  {" "}Page {submittedReportsPage} of {submittedReportsTotalPages}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={submittedReportsPage <= 1}
+                    onClick={() => setSubmittedReportsPage((page) => Math.max(1, page - 1))}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={submittedReportsPage >= submittedReportsTotalPages}
+                    onClick={() => setSubmittedReportsPage((page) => Math.min(submittedReportsTotalPages, page + 1))}
+                  >
+                    Next
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
         </CardContent>

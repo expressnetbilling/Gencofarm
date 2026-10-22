@@ -80,22 +80,14 @@ const admin = __importStar(require("firebase-admin"));
 const https_1 = require("firebase-functions/v2/https");
 const params_1 = require("firebase-functions/params");
 // ---------------------------------------------------------------------------
-// SMTP Configuration via Firebase Secrets
+// SMTP Configuration via Firebase environment parameters
 // ---------------------------------------------------------------------------
-// These are set via:
-//   firebase functions:secrets:set SMTP_HOST
-//   firebase functions:secrets:set SMTP_PORT
-//   firebase functions:secrets:set SMTP_USER
-//   firebase functions:secrets:set SMTP_PASS
-//   firebase functions:secrets:set SMTP_FROM
-//
-// Alternatively, set them as environment variables in the Firebase Console
-// under Cloud Functions configuration.
-const smtpHost = (0, params_1.defineSecret)("SMTP_HOST");
-const smtpPort = (0, params_1.defineSecret)("SMTP_PORT");
-const smtpUser = (0, params_1.defineSecret)("SMTP_USER");
-const smtpPass = (0, params_1.defineSecret)("SMTP_PASS");
-const smtpFrom = (0, params_1.defineSecret)("SMTP_FROM");
+// These are loaded from functions/.env during Firebase deployment.
+const smtpHost = (0, params_1.defineString)("SMTP_HOST");
+const smtpPort = (0, params_1.defineInt)("SMTP_PORT", { default: 587 });
+const smtpUser = (0, params_1.defineString)("SMTP_USER");
+const smtpPass = (0, params_1.defineString)("SMTP_PASS");
+const smtpFrom = (0, params_1.defineString)("SMTP_FROM");
 // ---------------------------------------------------------------------------
 // CORS Handling (manual — consistent with existing functions pattern)
 // ---------------------------------------------------------------------------
@@ -172,7 +164,6 @@ exports.sendEmail = (0, https_1.onRequest)({
     // Uncomment and set if you need a minimum for cold-start latency:
     // minInstances: 0,
     region: "us-central1",
-    secrets: [smtpHost, smtpPort, smtpUser, smtpPass, smtpFrom],
 }, async (req, res) => {
     // ── CORS preflight ──
     if (req.method === "OPTIONS") {
@@ -216,8 +207,8 @@ exports.sendEmail = (0, https_1.onRequest)({
         const nodemailer = await Promise.resolve().then(() => __importStar(require("nodemailer")));
         const transporter = nodemailer.createTransport({
             host: smtpHost.value(),
-            port: parseInt(smtpPort.value(), 10) || 587,
-            secure: parseInt(smtpPort.value(), 10) === 465, // true for 465, false for 587
+            port: smtpPort.value(),
+            secure: smtpPort.value() === 465, // true for 465, false for 587
             auth: {
                 user: smtpUser.value(),
                 pass: smtpPass.value(),

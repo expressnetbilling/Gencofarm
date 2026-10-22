@@ -3,6 +3,7 @@ import {
   BarChart3,
   BookOpenCheck,
   ChevronRight,
+  CircleGauge,
   ClipboardPenLine,
   ClipboardPlus,
   DoorOpen,
@@ -15,11 +16,11 @@ import {
   SlidersHorizontal,
   Stethoscope,
   Sprout,
+  Target,
   UserPlus,
   UserRoundCheck,
   UsersRound,
   Waves,
-  Wheat,
   TrendingUp,
   type LucideIcon,
 } from "lucide-react";
@@ -86,19 +87,19 @@ const buildSections = (userRole: string | null, userAttribute: string | null): N
   return [
     {
       title: "Reports",
-      icon: TrendingUp,
+      icon: FileBarChart,
       visible: canAccessReports(userRole, userAttribute),
       items: [
         { title: "Performance Report", url: "/dashboard/reports", icon: FileBarChart },
-        { title: "Sales Metrics", url: "/dashboard/salesreport", icon: BarChart3 },
+        { title: "Sales Metrics", url: "/dashboard/salesreport", icon: TrendingUp },
       ],
     },
     {
       title: "Farmer Data",
-      icon: UsersRound,
+      icon: UserRoundCheck,
       visible: canAccessFarmerData(userRole, userAttribute),
       items: [
-         { title: "Progress Dashboard", url: "/dashboard/livestock/analytics", icon: Gauge },
+         { title: "Progress Dashboard", url: "/dashboard/livestock/analytics", icon: CircleGauge },
         { title: "Livestock Farmers", url: "/dashboard/livestock", icon: UserRoundCheck },
        
         { title: "Fodder Farmers", url: "/dashboard/fodder", icon: Sprout },
@@ -107,7 +108,7 @@ const buildSections = (userRole: string | null, userAttribute: string | null): N
     },
     {
       title: "Offtake",
-      icon: HandCoins,
+      icon: ShoppingBag,
       visible: canAccessLivestockOfftake || canAccessFodderOfftake,
       items: [
         ...(canAccessLivestockOfftake
@@ -117,7 +118,7 @@ const buildSections = (userRole: string | null, userAttribute: string | null): N
     },
     {
       title: "Infrastructure",
-      icon: Factory,
+      icon: Waves,
       visible: canAccessInfrastructure(userRole, userAttribute),
       items: [
         { title: "Hay Storage", url: "/dashboard/hay-storage", icon: Archive },
@@ -126,7 +127,7 @@ const buildSections = (userRole: string | null, userAttribute: string | null): N
     },
     {
       title: "Field Activities",
-      icon: ClipboardPenLine,
+      icon: Target,
       visible: canAccessFieldActivities(userRole, userAttribute),
       items: [
         ...(canAccessFieldTeamPage
@@ -217,12 +218,12 @@ export function DashboardSidebar() {
           : [];
   const showStandaloneDashboard = roleMenuItems.length === 0 && canAccessDashboard(userRole, userAttribute);
   const showBottomRequisition = canAccessRequisition(userRole, userAttribute);
-  const sidebarItemClassName = "h-7 gap-1 px-1 py-0 text-[13px] font-medium tracking-tight antialiased";
-  const sidebarSubItemClassName = "h-6 gap-1.5 pl-2 pr-1 py-0 text-[13px] font-medium tracking-tight antialiased";
-  const footerItemClassName = "h-10 gap-1 px-1 py-1 text-[13px] font-medium tracking-tight antialiased border-l-2 border-l-yellow-500/80";
+  const sidebarItemClassName = "h-7 gap-1.5 px-1.5 py-0 text-[12.5px] font-normal tracking-normal antialiased";
+  const sidebarSubItemClassName = "h-7 px-2 py-1 text-[12.5px] font-normal tracking-normal antialiased";
+  const footerItemClassName = "h-10 gap-1.5 px-1.5 py-1 text-[12.5px] font-normal tracking-normal antialiased border-l-2 border-l-yellow-500/70";
 
   return (
-    <Sidebar className={`${collapsed ? "w-14" : "w-64"} bg-green-700 text-white antialiased`} collapsible="icon">
+    <Sidebar className={`${collapsed ? "w-14" : "w-64"} bg-green-600 text-white antialiased`} collapsible="icon">
       <SidebarHeader className="border-b border-orange-500 bg-white">
         <div className="flex items-center gap-2">
           <div className="flex h-[60px] w-[60px] items-center  bg-white/20">
@@ -236,7 +237,7 @@ export function DashboardSidebar() {
         </div>
       </SidebarHeader>
 
-      <SidebarContent className="bg-green-700 gap-0">
+      <SidebarContent className="bg-green-600 gap-0">
         <SidebarGroup className="py-1">
           <SidebarGroupContent>
             <SidebarMenu className="gap-0.5">
@@ -246,8 +247,8 @@ export function DashboardSidebar() {
                     <NavLink
                       to="/dashboard"
                       end
-                      className="text-green-50 transition-colors hover:bg-green-600"
-                      activeClassName="bg-white font-semibold text-green-700 shadow-sm"
+                      className="text-green-50 transition-colors hover:bg-green-500"
+                      activeClassName="bg-white font-medium text-green-700 shadow-sm"
                     >
                       <Gauge className="h-4 w-4" />
                       {!collapsed && <span>Dashboard Overview</span>}
@@ -262,8 +263,8 @@ export function DashboardSidebar() {
                     <NavLink
                       to={item.url}
                       end={item.url === "/dashboard"}
-                      className="text-green-50 transition-colors hover:bg-green-600"
-                      activeClassName="bg-white font-semibold text-green-700 shadow-sm"
+                      className="text-green-50 transition-colors hover:bg-green-500"
+                      activeClassName="bg-white font-medium text-green-700 shadow-sm"
                     >
                       <item.icon className="h-4 w-4" />
                       {!collapsed && <span>{item.title}</span>}
@@ -286,7 +287,7 @@ export function DashboardSidebar() {
                   <Collapsible defaultOpen className="group/collapsible">
                     <SidebarMenuItem>
                       <CollapsibleTrigger asChild>
-                        <SidebarMenuButton className={`${sidebarItemClassName} text-green-50 transition-colors hover:bg-green-600`}>
+                        <SidebarMenuButton className={`${sidebarItemClassName} text-green-50 transition-colors hover:bg-green-500`}>
                           <section.icon className="h-4 w-4" />
                           {!collapsed && (
                             <>
@@ -299,16 +300,16 @@ export function DashboardSidebar() {
 
                       {!collapsed && (
                         <CollapsibleContent>
-                          <SidebarMenuSub className="mx-0 gap-0.5 border-l border-green-500/40 pl-1">
+                          <SidebarMenuSub className="mx-0 gap-1.5 border-l border-green-400/50 pl-1">
                             {section.items.map((item) => (
                               <SidebarMenuSubItem key={item.title}>
                                 <SidebarMenuSubButton asChild className={sidebarSubItemClassName}>
                                   <NavLink
                                     to={item.url}
-                                    className="text-green-100/70 transition-colors hover:bg-green-600"
-                                    activeClassName="bg-white font-semibold text-green-700"
+                                    className="text-green-50/85 transition-colors hover:bg-green-500"
+                                    activeClassName="bg-white font-medium text-green-700"
                                   >
-                                    <item.icon className="h-3.5 w-3.5" />
+                                    <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
                                     <span>{item.title}</span>
                                   </NavLink>
                                 </SidebarMenuSubButton>
@@ -333,8 +334,8 @@ export function DashboardSidebar() {
                   <SidebarMenuButton asChild className={sidebarItemClassName}>
                     <NavLink
                       to="/dashboard/orders"
-                      className="text-green-50 transition-colors hover:bg-green-600"
-                      activeClassName="bg-white font-semibold text-green-700 shadow-sm"
+                      className="text-green-50 transition-colors hover:bg-green-500"
+                      activeClassName="bg-white font-medium text-green-700 shadow-sm"
                     >
                       <ShoppingBag className="h-4 w-4" />
                       {!collapsed && <span>Orders</span>}
@@ -354,9 +355,8 @@ export function DashboardSidebar() {
                   <SidebarMenuButton asChild className={sidebarItemClassName}>
                     <NavLink
                       to="/dashboard/requisition"
-                      className="text-green-50 transition-colors hover:bg-green-600"
-                      activeClassName="bg-white font-semibold text-green-700 shadow-sm"
-                    >
+                      className="text-green-50 transition-colors hover:bg-green-500"
+                      activeClassName="bg-white font-medium text-green-700 shadow-sm">
                       <ClipboardPlus className="h-4 w-4" />
                       {!collapsed && <span>Requisitions</span>}
                     </NavLink>
@@ -368,15 +368,15 @@ export function DashboardSidebar() {
         )}
       </SidebarContent>
 
-      <SidebarFooter className="border-t border-yellow-500 bg-green-700 py-4 px-2">
+      <SidebarFooter className="border-t border-yellow-500 bg-green-600 py-4 px-2">
         <SidebarMenu>
           {canAccessUserManagement(userRole, userAttribute) && (
             <SidebarMenuItem>
               <SidebarMenuButton asChild className={footerItemClassName}>
                 <NavLink
                   to="/dashboard/users"
-                  className="text-green-50 transition-colors hover:bg-green-600"
-                  activeClassName="border-yellow-500 bg-white font-semibold text-green-700 shadow-sm"
+                  className="text-green-50 transition-colors hover:bg-green-500"
+                  activeClassName="border-yellow-500 bg-white font-medium text-green-700 shadow-sm"
                 >
                   <SlidersHorizontal className="h-4 w-4" />
                   {!collapsed && <span>Site Management</span>}
@@ -388,7 +388,7 @@ export function DashboardSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton
               onClick={signOutUser}
-              className={`${footerItemClassName} text-green-50 transition-colors hover:bg-green-600`}
+              className={`${footerItemClassName} text-green-50 transition-colors hover:bg-green-500`}
             >
               <DoorOpen className="h-4 w-4" />
               {!collapsed && <span>Logout</span>}

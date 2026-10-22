@@ -1366,10 +1366,10 @@ const OrderTableRow = memo(function OrderTableRow({
   row, userCanEditOrders, userIsAdmin, onView, onEdit, onOpenTeam, onMarkComplete, onDelete,
 }: OrderTableRowProps) {
   return (
-    <tr className="border-b hover:bg-blue-50 transition-colors group">
+    <tr className="border-b hover:bg-green-50 transition-colors group">
       <td className="py-2 px-4 text-xs text-gray-500">{formatDate(row.batchDate)}</td>
       <td className="py-2 px-4 font-medium text-sm">{row.county}</td>
-      <td className="py-2 px-4 text-xs text-gray-600 max-w-[140px] truncate">{formatRecordName(row.username)}</td>
+      {/* <td className="py-2 px-4 text-xs text-gray-600 max-w-[140px] truncate">{formatRecordName(row.username)}</td> */}
       <td className="py-2 px-4 font-semibold text-xs">{row.targetGoats.toLocaleString()}</td>
       <td className="py-2 px-4 text-xs text-gray-600">{row.recordedGoats.toLocaleString()}</td>
       <td className="py-2 px-4 font-semibold text-xs">{row.goatsBought.toLocaleString()}</td>
@@ -1383,7 +1383,7 @@ const OrderTableRow = memo(function OrderTableRow({
           </Button>
           {userCanEditOrders && (
             <>
-              <Button variant="ghost" size="icon" onClick={() => onEdit(row.batchId)} className="h-7 w-7 text-blue-600 hover:bg-blue-50" title="Edit">
+              <Button variant="ghost" size="icon" onClick={() => onEdit(row.batchId)} className="h-7 w-7 text-green-700 hover:bg-green-50" title="Edit">
                 <Pencil className="h-3.5 w-3.5" />
               </Button>
               <Button variant="ghost" size="icon" onClick={() => onOpenTeam(row.batchId)} className="h-7 w-7 text-purple-600 hover:bg-purple-50" title="Offtake Team">
@@ -2901,7 +2901,7 @@ const OrdersPage = () => {
       {/* Header */}
       <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex items-center gap-3">
-          <div className="rounded-xl bg-blue-600 p-2.5 text-white shadow-md shadow-blue-200">
+          <div className="rounded-xl bg-green-600 p-2.5 text-white shadow-md shadow-green-200">
             <ShoppingCart className="h-5 w-5" />
           </div>
           <div>
@@ -2932,7 +2932,7 @@ const OrdersPage = () => {
             <Button
               onClick={openCreateDialog}
               disabled={!activeProgram}
-              className="gap-2 bg-blue-600 text-white shadow-md shadow-blue-200 hover:bg-blue-700"
+              className="gap-2 bg-green-600 text-white shadow-md shadow-green-200 hover:bg-green-700"
             >
               <Plus className="h-4 w-4" />
               New Order
@@ -2945,8 +2945,8 @@ const OrdersPage = () => {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card className="border-slate-200 border-l-4 border-l-[#0B1F5F] shadow-sm">
           <CardContent className="flex items-center gap-4 p-5">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-blue-50 border border-blue-100">
-              <ShoppingCart className="h-6 w-6 text-blue-600" />
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-green-50 border border-green-100">
+              <ShoppingCart className="h-6 w-6 text-green-600" />
             </div>
             <div className="min-w-0">
               <p className="text-xs font-medium uppercase tracking-wider text-slate-600">Total Orders</p>
@@ -3091,15 +3091,15 @@ const OrdersPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-500 text-White text-xs">
-                      <th className="py-3 px-3 font-semibold text-white ">Order Date</th>
-                      <th className="py-3 px-3 font-semibold text-white ">County</th>
+                    <tr className="bg-green-100 text-green-900 text-xs">
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Order Date</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">County</th>
                      
-                      <th className="py-3 px-3 font-semibold text-white ">Target Goats</th>
-                      <th className="py-3 px-3 font-semibold text-white ">Recorded Goats</th>
-                      <th className="py-3 px-3 font-semibold text-white ">Purchased</th>
-                      <th className="py-3 px-3 font-semibold text-white ">Status</th>
-                      <th className="py-3 px-3 font-semibold text-white ">Actions</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Target Goats</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Recorded Goats</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Purchased</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Status</th>
+                      <th className="py-3 px-3 font-semibold text-green-900 ">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -3288,7 +3288,7 @@ const OrdersPage = () => {
           </div>
           <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
             <Button variant="outline" onClick={closeCreateDialog} disabled={creatingOrder} className="border-slate-200 text-sm">Cancel</Button>
-            <Button onClick={handleCreateOrder} disabled={creatingOrder} className="bg-blue-600 text-white hover:bg-blue-700 text-sm shadow-sm">
+            <Button onClick={handleCreateOrder} disabled={creatingOrder} className="bg-green-600 text-white hover:bg-green-700 text-sm shadow-sm">
               {creatingOrder ? "Creating..." : "Create Order"}
             </Button>
           </div>
@@ -3345,11 +3345,11 @@ const OrdersPage = () => {
                 </div>
                 <Table>
                   <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="h-7 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Date</TableHead>
-                      <TableHead className="h-7 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Purchased By</TableHead>
-                      <TableHead className="h-7 px-3 py-1 text-right text-[10px] font-semibold uppercase tracking-wider text-slate-500">Goats Bought</TableHead>
-                      <TableHead className="h-7 px-3 py-1 text-right text-[10px] font-semibold uppercase tracking-wider text-slate-500">Balance</TableHead>
+                    <TableRow className="bg-green-100 hover:bg-green-100">
+                      <TableHead className="h-7 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-green-900">Date</TableHead>
+                      <TableHead className="h-7 px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-green-900">Purchased By</TableHead>
+                      <TableHead className="h-7 px-3 py-1 text-right text-[10px] font-semibold uppercase tracking-wider text-green-900">Goats Bought</TableHead>
+                      <TableHead className="h-7 px-3 py-1 text-right text-[10px] font-semibold uppercase tracking-wider text-green-900">Balance</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -3379,10 +3379,10 @@ const OrdersPage = () => {
 
               {/* Edit section: Purchasing Date + Goats Purchased */}
               {ordersDialogIsEditing && (
-                <div className="rounded-lg border border-blue-100 bg-blue-50/40 p-4">
+                <div className="rounded-lg border border-green-100 bg-green-50/40 p-4">
                   <div className="flex items-center justify-between mb-3">
                     
-                    <Button size="sm" className="h-8 bg-blue-600 text-white hover:bg-blue-700 text-xs" onClick={saveDialogGoatsBought}>
+                    <Button size="sm" className="h-8 bg-green-600 text-white hover:bg-green-700 text-xs" onClick={saveDialogGoatsBought}>
                       <Save className="mr-1.5 h-3.5 w-3.5" />
                       Add Purchase
                     </Button>
@@ -3433,7 +3433,7 @@ const OrdersPage = () => {
                       <Button
                         type="button"
                         size="sm"
-                        className="h-9 bg-blue-600 text-white hover:bg-blue-700 text-xs"
+                        className="h-9 bg-green-600 text-white hover:bg-green-700 text-xs"
                         onClick={() => orderCsvInputRef.current?.click()}
                         disabled={orderCsvUploading}
                       >
@@ -3507,14 +3507,14 @@ const OrdersPage = () => {
                 <div className="overflow-x-auto">
                   <Table>
                     <TableHeader>
-                      <TableRow className="border-b border-slate-100 bg-slate-50/50 hover:bg-slate-50/50">
-                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Date</TableHead>
-                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Field Officer</TableHead>
-                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Location</TableHead>
-                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">Subcounty</TableHead>
-                        <TableHead className="h-8 px-4 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Goats</TableHead>
+                      <TableRow className="border-b border-green-200 bg-green-100 hover:bg-green-100">
+                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-green-900">Date</TableHead>
+                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-green-900">Field Officer</TableHead>
+                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-green-900">Location</TableHead>
+                        <TableHead className="h-8 px-4 text-left text-[11px] font-semibold uppercase tracking-wider text-green-900">Subcounty</TableHead>
+                        <TableHead className="h-8 px-4 text-right text-[11px] font-semibold uppercase tracking-wider text-green-900">Goats</TableHead>
                         {ordersDialogIsEditing && (
-                          <TableHead className="h-8 px-3 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500">Actions</TableHead>
+                          <TableHead className="h-8 px-3 text-right text-[11px] font-semibold uppercase tracking-wider text-green-900">Actions</TableHead>
                         )}
                       </TableRow>
                     </TableHeader>
@@ -3524,7 +3524,7 @@ const OrdersPage = () => {
                         const orderKey = `${ordersDialogRow.batchId}:${index}`;
                         const isEditing = ordersDialogIsEditing && editingOrderKey === orderKey;
                         return (
-                          <TableRow key={orderKey} className="border-b border-slate-50 hover:bg-blue-50/30">
+                          <TableRow key={orderKey} className="border-b border-slate-50 hover:bg-green-50/40">
                             <TableCell className="px-4 py-2">
                               {isEditing ? (
                                 <Input type="date" value={orderDateDraft} onChange={(e) => setOrderDateDraft(e.target.value)} className="h-7 max-w-36 text-xs border-slate-200" />
@@ -3648,7 +3648,7 @@ const OrdersPage = () => {
                         type="button"
                         onClick={addOfftakeTeamMember}
                         disabled={offtakeTeamSaving || !offtakeTeamFormName.trim()}
-                        className="bg-blue-600 text-white hover:bg-blue-700 text-sm shadow-sm"
+                        className="bg-green-600 text-white hover:bg-green-700 text-sm shadow-sm"
                       >
                         <Plus className="mr-1.5 h-4 w-4" />
                         Add Member
@@ -3714,7 +3714,7 @@ const OrdersPage = () => {
                   {userCanEditOrders ? "Cancel" : "Close"}
                 </Button>
                 {userCanEditOrders && (
-                  <Button onClick={saveOfftakeTeamAssignments} disabled={offtakeTeamSaving} className="bg-blue-600 text-white hover:bg-blue-700 text-sm shadow-sm">
+                  <Button onClick={saveOfftakeTeamAssignments} disabled={offtakeTeamSaving} className="bg-green-600 text-white hover:bg-green-700 text-sm shadow-sm">
                     {offtakeTeamSaving ? <Loader2 className="mr-1.5 h-4 w-4 animate-spin" /> : <Save className="mr-1.5 h-4 w-4" />}
                     Save Team
                   </Button>

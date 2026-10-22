@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
+﻿import { useState, useEffect, useCallback, useMemo, useRef, memo } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { getAuth } from "firebase/auth";
 import { db, ref, set, update, remove, push, subscribeCollectionByProgrammes } from "@/lib/firebase";
@@ -40,6 +40,17 @@ interface OfftakeData {
   offtakeUserId: string;
   totalprice: number;
   createdAt: number;
+  paidAt: string | number;
+  animalType: string;
+  carcassRatio: number;
+  offtakeType: string;
+  farmerCount: number;
+  groupName: string;
+  representative: string;
+  ward: string;
+  previewTotalPrice: number;
+  pricePerKg: number;
+  previewPricePerAnimal: number[];
 }
 
 interface Filters {
@@ -58,6 +69,7 @@ interface Stats {
   averageCarcassWeight: number;
   averageRevenue: number;
   totalFarmers: number;
+  totalSessions: number;
   totalMaleFarmers: number;
   totalFemaleFarmers: number;
   avgPricePerCarcassKg: number;
@@ -79,6 +91,7 @@ interface EditForm {
   phoneNumber: string;
   region: string;
   location: string;
+  paidAt: string;
 }
 
 interface WeightEditForm {
@@ -177,6 +190,21 @@ const formatDate = (date: any): string => {
     month: 'short',
     day: 'numeric'
   }) : 'N/A';
+};
+
+// Formats a createdAt millisecond timestamp into a human readable date + time string,
+// used to show "when" a record was submitted (alongside "who" submitted it).
+const formatDateTime = (timestamp: number | null | undefined): string => {
+  if (!timestamp || !Number.isFinite(timestamp)) return 'N/A';
+  const date = new Date(timestamp);
+  if (isNaN(date.getTime())) return 'N/A';
+  return date.toLocaleString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
 };
 
 const getOfftakeTimestamp = (record: Partial<OfftakeData> | null | undefined): number => {
@@ -393,6 +421,7 @@ const mapRawOfftakeRecord = (
   const liveWeights = goats.map((g: any) => parseFloat(g.live) || 0);
   const carcassWeights = goats.map((g: any) => parseFloat(g.carcass) || 0);
   const prices = goats.map((g: any) => parseFloat(g.price) || 0);
+  const previewPrices = goats.map((g: any) => parseFloat(g.previewPrice) || 0);
 
   const resolvedIdNumber = resolveFarmerId(item.idNumber, key, {
     name: item.name || item.farmerName || "",
@@ -420,6 +449,17 @@ const mapRawOfftakeRecord = (
       offtakeUserId: item.offtakeUserId || "",
       totalprice: Number(item.totalPrice || item.totalprice || 0),
       createdAt: Number(item.createdAt || parsedItemDate?.getTime() || 0),
+      paidAt: item.paidAt || item.paid_at || "",
+      animalType: item.animalType || "",
+      carcassRatio: Number(item.carcassRatio) || 0,
+      offtakeType: item.offtakeType || "",
+      farmerCount: Number(item.farmerCount) || 0,
+      groupName: item.groupName || "",
+      representative: item.representative || "",
+      ward: item.ward || item.Ward || "",
+      previewTotalPrice: Number(item.previewTotalPrice) || 0,
+      pricePerKg: Number(item.pricePerKg) || 0,
+      previewPricePerAnimal: previewPrices,
     },
     missingIdUpdate: isMissingFarmerId(item.idNumber) ? resolvedIdNumber : undefined,
   };
@@ -622,6 +662,7 @@ const LivestockOfftakePage = () => {
     averageCarcassWeight: 0,
     averageRevenue: 0,
     totalFarmers: 0,
+    totalSessions: 0,
     totalMaleFarmers: 0,
     totalFemaleFarmers: 0,
     avgPricePerCarcassKg: 0
@@ -642,7 +683,8 @@ const LivestockOfftakePage = () => {
     idNumber: "",
     phoneNumber: "",
     region: "",
-    location: ""
+    location: "",
+    paidAt: ""
   });
 
   const [weightEditForm, setWeightEditForm] = useState<WeightEditForm>({
@@ -988,7 +1030,7 @@ const LivestockOfftakePage = () => {
       setFilteredOfftake([]);
       setStats({
         totalRegions: 0, totalAnimals: 0, totalRevenue: 0, averageLiveWeight: 0,
-        averageCarcassWeight: 0, averageRevenue: 0, totalFarmers: 0,
+        averageCarcassWeight: 0, averageRevenue: 0, totalFarmers: 0, totalSessions: 0,
         totalMaleFarmers: 0, totalFemaleFarmers: 0, avgPricePerCarcassKg: 0
       });
       return;
@@ -1031,10 +1073,22 @@ const LivestockOfftakePage = () => {
     const totalRevenue = sortedFiltered.reduce((sum, r) => sum + (r.totalprice || 0), 0);
     const uniqueRegions = new Set(sortedFiltered.map(f => f.region).filter(Boolean));
 
-    let totalMaleFarmers = 0, totalFemaleFarmers = 0;
+    // Group records by farmer (via idNumber, falling back to record id) so that a farmer
+    // who appears in the filtered set multiple times - e.g. because a search matched
+    // several of their sale records - is only counted once as a "farmer", while every
+    // one of their matching records still counts as a "session" (a time they sold).
+    const farmerMap = new Map<string, { gender: string }>();
     sortedFiltered.forEach(r => {
-      if (r.gender?.toLowerCase() === 'male') totalMaleFarmers++;
-      else if (r.gender?.toLowerCase() === 'female') totalFemaleFarmers++;
+      const key = getFarmerGroupingKey(r);
+      if (!farmerMap.has(key)) {
+        farmerMap.set(key, { gender: r.gender || '' });
+      }
+    });
+
+    let totalMaleFarmers = 0, totalFemaleFarmers = 0;
+    farmerMap.forEach(f => {
+      if (f.gender?.toLowerCase() === 'male') totalMaleFarmers++;
+      else if (f.gender?.toLowerCase() === 'female') totalFemaleFarmers++;
     });
 
     const totalLiveWeight = sortedFiltered.reduce((sum, r) => sum + calculateTotal(r.liveWeight), 0);
@@ -1047,7 +1101,8 @@ const LivestockOfftakePage = () => {
       averageLiveWeight: totalAnimals > 0 ? totalLiveWeight / totalAnimals : 0,
       averageCarcassWeight: totalAnimals > 0 ? totalCarcassWeight / totalAnimals : 0,
       averageRevenue: totalAnimals > 0 ? totalRevenue / totalAnimals : 0,
-      totalFarmers: sortedFiltered.length,
+      totalFarmers: farmerMap.size,
+      totalSessions: sortedFiltered.length,
       totalMaleFarmers,
       totalFemaleFarmers,
       avgPricePerCarcassKg: totalCarcassWeight > 0 ? totalRevenue / totalCarcassWeight : 0
@@ -1138,7 +1193,7 @@ const LivestockOfftakePage = () => {
         return;
       }
 
-      const headers = ['Date', 'Farmer Name', 'Gender', 'ID Number', 'Programme', 'Region (County)', 'Subcounty', 'Location', 'Phone Number', 'Total Animals', 'Live Weight (kg)', 'Carcass Weight (kg)', 'Price per Animal (KES)', 'Total Price (KES)'];
+      const headers = ['Date', 'Farmer Name', 'Gender', 'ID Number', 'Programme', 'Region (County)', 'Subcounty', 'Ward', 'Location', 'Phone Number', 'Offtake Type', 'Group Name', 'Representative', 'Farmer Count', 'Animal Type', 'Total Animals', 'Live Weight (kg)', 'Carcass Weight (kg)', 'Carcass Ratio', 'Price per Kg (KES)', 'Preview Price per Animal (KES)', 'Price per Animal (KES)', 'Preview Total Price (KES)', 'Total Price (KES)', 'Offtake User ID', 'Submitted By', 'Created At', 'Paid At'];
       const csvData: any[] = [];
 
       filteredOfftake.forEach(record => {
@@ -1156,19 +1211,33 @@ const LivestockOfftakePage = () => {
             i === 0 ? (record.programme || 'N/A') : '',
             i === 0 ? (record.region || 'N/A') : '',
             i === 0 ? (record.subcounty || 'N/A') : '',
+            i === 0 ? (record.ward || 'N/A') : '',
             i === 0 ? (record.location || 'N/A') : '',
             i === 0 ? (record.phoneNumber || 'N/A') : '',
+            i === 0 ? (record.offtakeType || 'N/A') : '',
+            i === 0 ? (record.groupName || 'N/A') : '',
+            i === 0 ? (record.representative || 'N/A') : '',
+            i === 0 ? (record.farmerCount || 0).toString() : '',
+            i === 0 ? (record.animalType || 'N/A') : '',
             i === 0 ? (record.noSheepGoats || 0).toString() : '',
             liveWeights[i] > 0 ? liveWeights[i].toFixed(1) : '',
             carcassWeights[i] > 0 ? carcassWeights[i].toFixed(2) : '',
+            i === 0 ? (record.carcassRatio || 0).toString() : '',
+            i === 0 ? (record.pricePerKg || 0).toString() : '',
+            record.previewPricePerAnimal[i] > 0 ? record.previewPricePerAnimal[i].toFixed(2) : '',
             prices[i] > 0 ? prices[i].toFixed(2) : '',
-            i === 0 ? (record.totalprice || 0).toFixed(2) : ''
+            i === 0 ? (record.previewTotalPrice || 0).toFixed(2) : '',
+            i === 0 ? (record.totalprice || 0).toFixed(2) : '',
+            i === 0 ? (record.offtakeUserId || 'N/A') : '',
+            i === 0 ? (record.username || 'N/A') : '',
+            i === 0 ? formatDateTime(record.createdAt) : '',
+            i === 0 ? (record.paidAt ? formatDate(record.paidAt) : 'Not Paid') : ''
           ]);
         }
         csvData.push(Array(headers.length).fill(''));
       });
 
-      const csvContent = [headers, ...csvData].map(row => row.map(f => `"${f}"`).join(',')).join('\n');
+      const csvContent = [headers, ...csvData].map(row => row.map(f => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
       const url = window.URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -1210,8 +1279,15 @@ const LivestockOfftakePage = () => {
         }
       });
 
-      const headers = ['ID Number', 'Farmer Name', 'Gender', 'Programme', 'Region (County)', 'Subcounty', 'Location', 'Phone Number', 'Sessions', 'Total Animals', 'Total Live Weight (kg)', 'Total Carcass Weight (kg)', 'Total Revenue (KES)'];
-      const csvRows = Array.from(groupedFarmers.values()).map(f => [f.idNumber, f.farmerName, f.gender, f.programme, f.region, f.subcounty, f.location, f.phoneNumber, f.sessions.toString(), f.totalAnimals.toString(), f.totalLiveWeight.toFixed(1), f.totalCarcassWeight.toFixed(2), f.totalRevenue.toFixed(2)]);
+      // "Average Price" is the farmer's overall revenue divided by the total number of
+      // animals they sold across all their sessions - i.e. what they earned per animal
+      // on average - rather than a lump total revenue figure.
+      const headers = ['ID Number', 'Farmer Name', 'Gender', 'Programme', 'Region (County)', 'Subcounty', 'Location', 'Phone Number', 'Sessions', 'Total Animals', 'Total Live Weight (kg)', 'Total Carcass Weight (kg)', 'Average Price (KES)'];
+      const csvRows = Array.from(groupedFarmers.values()).map(f => [
+        f.idNumber, f.farmerName, f.gender, f.programme, f.region, f.subcounty, f.location, f.phoneNumber,
+        f.sessions.toString(), f.totalAnimals.toString(), f.totalLiveWeight.toFixed(1), f.totalCarcassWeight.toFixed(2),
+        (f.totalAnimals > 0 ? f.totalRevenue / f.totalAnimals : 0).toFixed(2)
+      ]);
 
       const csvContent = [headers, ...csvRows].map(row => row.map(f => `"${f}"`).join(',')).join('\n');
       const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -1263,7 +1339,9 @@ const LivestockOfftakePage = () => {
         s.latestDate, s.farmerName, s.totalAnimals.toString(),
         (s.carcassCount > 0 ? s.carcassWeightTotal / s.carcassCount : 0).toFixed(2),
         (s.liveCount > 0 ? s.liveWeightTotal / s.liveCount : 0).toFixed(1),
-        (s.priceCount > 0 ? s.priceTotal / s.priceCount : 0).toFixed(2)
+        // Average Price is spread across every animal the farmer sold (not per session),
+        // so it reflects the average price per animal rather than a lump total price.
+        (s.totalAnimals > 0 ? s.priceTotal / s.totalAnimals : 0).toFixed(2)
       ]);
 
       const csvContent = [headers, ...rows].map(row => row.map(f => `"${f}"`).join(',')).join('\n');
@@ -1372,7 +1450,8 @@ const LivestockOfftakePage = () => {
               username: record.username,
               totalGoats,
               totalPrice,
-              goats: record.goats
+              goats: record.goats,
+              paidAt: record.paidAt || null
             };
 
             const newRef = await push(ref(db, 'offtakes'), recordData);
@@ -1397,7 +1476,8 @@ const LivestockOfftakePage = () => {
               username: String(recordData.username || ""),
               offtakeUserId: String(recordData.offtakeUserId || ""),
               totalprice: Number(totalPrice || 0),
-              createdAt: Number(generatedCreatedAt)
+              createdAt: Number(generatedCreatedAt),
+              paidAt: recordData.paidAt || ""
             });
           } catch (err) { console.error("Error pushing single record:", err); }
         }));
@@ -1431,7 +1511,8 @@ const LivestockOfftakePage = () => {
     setViewingRecord(record);
     setEditForm({
       date: formatDateForInput(record.date), farmerName: record.farmerName || "", gender: record.gender || "",
-      idNumber: record.idNumber || "", phoneNumber: record.phoneNumber || "", region: record.region || "", location: record.location || ""
+      idNumber: record.idNumber || "", phoneNumber: record.phoneNumber || "", region: record.region || "", location: record.location || "",
+      paidAt: formatDateForInput(record.paidAt)
     });
     setIsEditDialogOpen(true);
   }, [userIsAdmin]);
@@ -1511,7 +1592,8 @@ const LivestockOfftakePage = () => {
       const updatePayload = {
         date: editForm.date ? editForm.date : null,
         name: editForm.farmerName, gender: editForm.gender, idNumber: editForm.idNumber,
-        phone: editForm.phoneNumber, county: editForm.region, location: editForm.location
+        phone: editForm.phoneNumber, county: editForm.region, location: editForm.location,
+        paidAt: editForm.paidAt ? editForm.paidAt : null
       };
       await update(ref(db, `offtakes/${viewingRecord.id}`), updatePayload);
       setIsEditDialogOpen(false);
@@ -1565,10 +1647,10 @@ const LivestockOfftakePage = () => {
     <div className="space-y-6">
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="text-md font-bold mb-2 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h2 className="text-md font-bold mb-2 bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
             Livestock Offtake Data
           </h2>
-          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 font-bold px-3 py-1 w-fit">
+          <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 font-bold px-3 py-1 w-fit">
             {activeProgram === ALL_PROGRAMMES_VALUE ? "ALL PROGRAMMES" : `${activeProgram} PROGRAMME`}
           </Badge>
         </div>
@@ -1600,14 +1682,14 @@ const LivestockOfftakePage = () => {
           )}
           <Button variant="outline" size="sm" onClick={clearAllFilters} className="text-xs border-gray-300 hover:bg-gray-50">Clear Filters</Button>
           <Button variant="outline" size="sm" onClick={resetToCurrentMonth} className="text-xs border-gray-300 hover:bg-gray-50">This Month</Button>
-          <Button variant="outline" size="sm" onClick={() => setIsUploadDialogOpen(true)} className="text-xs border-gray-300 hover:bg-blue-50 hover:text-blue-600">
+          <Button variant="outline" size="sm" onClick={() => setIsUploadDialogOpen(true)} className="text-xs border-green-300 text-green-700 hover:bg-green-50">
             <Upload className="h-4 w-4 mr-2" /> Upload Data
           </Button>
 
           {isAdmin(userRole) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button disabled={exportLoading || filteredOfftake.length === 0} className="bg-gradient-to-r from-blue-800 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white shadow-md text-xs">
+                <Button disabled={exportLoading || filteredOfftake.length === 0} className="bg-green-600 text-white shadow-md hover:bg-green-700 text-xs">
                   <Download className="h-4 w-4 mr-2" /> {exportLoading ? "Exporting..." : `Export (${filteredOfftake.length})`}
                 </Button>
               </DropdownMenuTrigger>
@@ -1622,9 +1704,15 @@ const LivestockOfftakePage = () => {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <StatsCard title="TOTAL FARMERS" value={stats.totalFarmers.toLocaleString()} icon={Users} description={`${stats.totalMaleFarmers} Males | ${stats.totalFemaleFarmers} Females`} />
-        <StatsCard title="TOTAL ANIMALS" value={stats.totalAnimals.toLocaleString()} icon={Scale} description={`Avg Live: ${stats.averageLiveWeight.toFixed(1)}kg | Avg Carcass: ${stats.averageCarcassWeight.toFixed(1)}kg`} />
-        <StatsCard title="TOTAL COST" value={safeTruncate(formatCurrency(stats.totalRevenue))} icon={CreditCard} description={`Avg Price: ${formatCurrency(stats.averageRevenue)} | Avg per Kg: ${formatCurrency(stats.avgPricePerCarcassKg)}`} />
+        <StatsCard
+          title="TOTAL FARMERS"
+          value={stats.totalFarmers.toLocaleString()}
+          icon={Users}
+          subValue={`${stats.totalSessions.toLocaleString()} Session${stats.totalSessions === 1 ? '' : 's'}`}
+          description={`${stats.totalMaleFarmers} Males | ${stats.totalFemaleFarmers} Females`}
+        />
+        <StatsCard title="ANIMALS PURCHASED" value={stats.totalAnimals.toLocaleString()} icon={Scale} description={`Avg Live: ${stats.averageLiveWeight.toFixed(1)}kg | Avg Carcass: ${stats.averageCarcassWeight.toFixed(1)}kg`} />
+        <StatsCard title="PURCHASE COST" value={safeTruncate(formatCurrency(stats.totalRevenue))} icon={CreditCard} description={`Avg Price: ${formatCurrency(stats.averageRevenue)} | Avg per Kg: ${formatCurrency(stats.avgPricePerCarcassKg)}`} />
       </div>
 
       <Card className="shadow-lg border-0 bg-white">
@@ -1657,24 +1745,27 @@ const LivestockOfftakePage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-100">
+                    <tr className="bg-green-100 text-green-900">
                       <th className="py-2 px-4">
                         <Checkbox checked={selectedRecords.length === currentPageRecords.length && currentPageRecords.length > 0} onCheckedChange={handleSelectAll} />
                       </th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Date</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Farmer Name</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Gender</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">ID No</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">County</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Sub County</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">No.Animals</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Total Price</th>
-                      <th className="py-2 px-4 font-medium text-gray-600">Actions</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Date</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Farmer Name</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Gender</th>
+                      <th className="py-1 px-6 font-medium text-green-900">ID No</th>
+                      <th className="py-1 px-6 font-medium text-green-900">County</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Sub County</th>
+                      <th className="py-1 px-6 font-medium text-green-900">No.Animals</th>
+                      <th className="py-1 px-6 font-medium text-green-900">Total Price</th>
+                      {/* <th className="py-1 px-6 font-medium text-gray-600">Submitted By</th> */}
+                      {/* <th className="py-1 px-6 font-medium text-gray-600">Created At</th> */}
+                      {/* <th className="py-2 px-4 font-medium text-gray-600">Paid At</th> */}
+                      <th className="py-1 px-6 font-medium text-green-900">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {currentPageRecords.map((record) => (
-                      <tr key={record.id} className="border-b hover:bg-blue-50 transition-all text-sm">
+                      <tr key={record.id} className="border-b hover:bg-green-50 transition-all text-sm">
                         <td className="py-1 px-4">
                           <Checkbox checked={selectedRecords.includes(record.id)} onCheckedChange={() => handleSelectRecord(record.id)} />
                         </td>
@@ -1688,6 +1779,19 @@ const LivestockOfftakePage = () => {
                         <td className="py-1 px-6 text-xs">{record.subcounty || 'N/A'}</td>
                         <td className="py-1 px-6 text-xs font-bold">{record.noSheepGoats || 0}</td>
                         <td className="py-1 px-6 text-xs font-bold text-green-600">{formatCurrency(record.totalprice || 0)}</td>
+                        {/* <td className="py-1 px-6 text-xs">{record.username || 'N/A'}</td> */}
+                        {/* <td className="py-1 px-6 text-xs">{formatDateTime(record.createdAt)}</td> */}
+                        {/* <td className="py-1 px-6 text-xs">
+                          {record.paidAt ? (
+                            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 font-normal">
+                              {formatDate(record.paidAt)}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="bg-orange-50 text-orange-700 border-orange-200 font-normal">
+                              Not Paid
+                            </Badge>
+                          )}
+                        </td> */}
                         <td className="py-1 px-6 text-xs">
                           <div className="flex gap-2">
                             <Button variant="outline" size="sm" onClick={() => openViewDialog(record)} className="h-8 w-8 p-0 hover:bg-green-100 border-green-200">
@@ -1728,6 +1832,53 @@ const LivestockOfftakePage = () => {
           <DialogHeader><DialogTitle className="flex items-center gap-2 text-slate-900"><Eye className="h-5 w-5 text-green-600" /> Livestock Offtake Details</DialogTitle></DialogHeader>
           {viewingRecord && (
             <div className="space-y-6 py-4 overflow-y-auto max-h-[60vh]">
+              <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-white to-blue-50/50 p-5 shadow-sm">
+                <div className="flex items-center justify-between gap-3 mb-5 pb-4 border-b border-slate-200">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="h-11 w-11 shrink-0 rounded-full bg-green-100 text-green-700 flex items-center justify-center font-semibold">
+                      {(viewingRecord.farmerName || '?').trim().charAt(0).toUpperCase() || '?'}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-base font-semibold text-slate-900 leading-tight truncate">{viewingRecord.farmerName || 'N/A'}</p>
+                      <p className="text-xs text-slate-500">{viewingRecord.gender || 'N/A'} Farmer</p>
+                    </div>
+                  </div>
+
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+                  {[
+                    { label: "ID Number", value: viewingRecord.idNumber || 'N/A', icon: CreditCard },
+                    { label: "County", value: viewingRecord.region || 'N/A', icon: MapPin },
+                    { label: "Subcounty", value: viewingRecord.subcounty || 'N/A', icon: MapPin },
+                    { label: "Ward", value: viewingRecord.ward || 'N/A', icon: MapPin },
+                    { label: "Location", value: viewingRecord.location || 'N/A', icon: MapPin },
+                    { label: "Offtake Type", value: viewingRecord.offtakeType || 'N/A', icon: Users },
+                    { label: "Group Name", value: viewingRecord.groupName || 'N/A', icon: Users },
+                    { label: "Representative", value: viewingRecord.representative || 'N/A', icon: Users },
+                    { label: "Farmer Count", value: viewingRecord.farmerCount || 'N/A', icon: Users },
+                    { label: "Animal Type", value: viewingRecord.animalType || 'N/A', icon: Scale },
+                    { label: "Carcass Ratio", value: viewingRecord.carcassRatio ? `${viewingRecord.carcassRatio}` : 'N/A', icon: Weight },
+                    { label: "Price per Kg", value: viewingRecord.pricePerKg ? formatCurrency(viewingRecord.pricePerKg) : 'N/A', icon: CreditCard },
+                    { label: "Preview Total Price", value: viewingRecord.previewTotalPrice ? formatCurrency(viewingRecord.previewTotalPrice) : 'N/A', icon: CreditCard },
+                    { label: "Total Price", value: formatCurrency(viewingRecord.totalprice || 0), icon: CreditCard },
+                    { label: "Offtake User ID", value: viewingRecord.offtakeUserId || 'N/A', icon: CreditCard },
+                    { label: "Avg Carcass Wt", value: `${calculateAverage(viewingRecord.carcassWeight).toFixed(2)} kg`, icon: Weight },
+                    { label: "Avg Live Wt", value: `${calculateAverage(viewingRecord.liveWeight).toFixed(1)} kg`, icon: Scale },
+                    { label: "Submitted By", value: viewingRecord.username || 'N/A', icon: Users },
+                    { label: "Created At", value: formatDateTime(viewingRecord.createdAt), icon: Calendar },
+                    { label: "Paid At", value: viewingRecord.paidAt ? formatDate(viewingRecord.paidAt) : 'Not Paid', icon: CreditCard },
+                  ].map((field) => (
+                    <div key={field.label} className="bg-white rounded-lg border border-slate-100 p-3 shadow-sm">
+                      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-green-700 mb-1.5">
+                        <field.icon className="h-3 w-3" /> {field.label}
+                      </div>
+                      <p className="text-sm font-semibold text-slate-800 break-words">{field.value}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div className="bg-slate-50 rounded-xl p-4">
                 <div className="flex justify-between items-center mb-4">
                   <h3 className="font-semibold text-slate-800 flex items-center gap-2"><Weight className="h-4 w-4" /> Animal Details Table</h3>
@@ -1735,10 +1886,11 @@ const LivestockOfftakePage = () => {
                 </div>
                 <table className="w-full border border-gray-300 text-sm">
                   <thead>
-                    <tr className="bg-blue-100">
+                    <tr className="bg-green-100 text-green-900">
                       <th className="border p-2 text-left">Animal #</th>
                       <th className="border p-2 text-left">Live Weight (kg)</th>
                       <th className="border p-2 text-left">Carcass Weight (kg)</th>
+                      <th className="border p-2 text-left">Preview Price (Ksh)</th>
                       <th className="border p-2 text-left">Price (Ksh)</th>
                     </tr>
                   </thead>
@@ -1748,6 +1900,7 @@ const LivestockOfftakePage = () => {
                         <td className="p-2">Animal {index + 1}</td>
                         <td className="p-2">{viewingRecord.liveWeight[index]?.toFixed(1)}</td>
                         <td className="p-2">{viewingRecord.carcassWeight[index]?.toFixed(2) || 'N/A'}</td>
+                        <td className="p-2">{formatCurrency(viewingRecord.previewPricePerAnimal[index] || 0)}</td>
                         <td className="p-2 text-green-700 font-medium">{formatCurrency(viewingRecord.pricePerGoatAndSheep[index] || 0)}</td>
                       </tr>
                     ))}
@@ -1763,7 +1916,7 @@ const LivestockOfftakePage = () => {
       {/* Edit Form Dialog */}
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="sm:max-w-md bg-white rounded-2xl">
-          <DialogHeader><DialogTitle><Edit className="h-5 w-5 text-blue-600 inline mr-2" />Edit Record</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle><Edit className="h-5 w-5 text-green-600 inline mr-2" />Edit Record</DialogTitle></DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-2 gap-4">
               <div><Label>Date</Label><Input type="date" value={editForm.date} onChange={(e) => setEditForm(p => ({ ...p, date: e.target.value }))} /></div>
@@ -1777,6 +1930,13 @@ const LivestockOfftakePage = () => {
                 </Select>
               </div>
               <div><Label>ID Number</Label><Input value={editForm.idNumber} onChange={(e) => setEditForm(p => ({ ...p, idNumber: e.target.value }))} /></div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <Label>Paid At</Label>
+                <Input type="date" value={editForm.paidAt} onChange={(e) => setEditForm(p => ({ ...p, paidAt: e.target.value }))} />
+                <p className="text-[11px] text-gray-400 mt-1">Leave blank if the farmer hasn't been paid yet.</p>
+              </div>
             </div>
           </div>
           <DialogFooter>
@@ -1793,7 +1953,7 @@ const LivestockOfftakePage = () => {
           <div className="space-y-4 py-4 overflow-y-auto max-h-[60vh]">
             <table className="w-full border text-sm">
               <thead>
-                <tr className="bg-blue-50">
+                <tr className="bg-green-100 text-green-900">
                   <th className="p-2 text-left">Animal</th>
                   <th className="p-2 text-left">Live Weight (kg)</th>
                   <th className="p-2 text-left">Carcass Weight (kg)</th>
@@ -1846,7 +2006,7 @@ const LivestockOfftakePage = () => {
             {uploadLoading && (
               <div className="space-y-2">
                 <div className="flex justify-between text-xs text-slate-500"><span>Streaming batches to cloud storage...</span><span>{uploadProgress.current} / {uploadProgress.total}</span></div>
-                <div className="w-full bg-slate-100 h-2 rounded-full"><div className="bg-blue-600 h-2 rounded-full transition-all duration-300" style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}></div></div>
+                <div className="w-full bg-slate-100 h-2 rounded-full"><div className="bg-green-600 h-2 rounded-full transition-all duration-300" style={{ width: `${(uploadProgress.current / uploadProgress.total) * 100}%` }}></div></div>
               </div>
             )}
           </div>
@@ -1896,3 +2056,4 @@ const LivestockOfftakePage = () => {
 };
 
 export default LivestockOfftakePage;
+

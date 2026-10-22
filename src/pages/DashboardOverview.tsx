@@ -2734,27 +2734,24 @@ const DashboardOverview = () => {
               />
             </div>
 
-            {/* Row 1: Infrastructure + Animal Census */}
-            <div className="grid items-stretch gap-6 lg:grid-cols-2">
-              <DonutPanel
-                title="INFRASTRUCTURE"
-                data={maintainedInfrastructureData}
-                tooltipValueLabel="boreholes"
-                legendItems={maintainedInfrastructureData}
-              />
-              <AnnualComparisonPanel
-                title="ANIMAL CENSUS"
-                comparison={overviewData.animalCensusComparison ?? EMPTY_OVERVIEW_DATA.animalCensusComparison}
-              />
-            </div>
-
-            {/* Row 2: Registration Donut + Recently Visited Locations */}
+            {/* Row 1: Farmers Registration + Recently Registered Farmers */}
             <div className="grid items-stretch gap-6 lg:grid-cols-2">
               <DonutPanel
                 title="FARMERS REGISTRATION PER YEAR"
                 data={registrationComparisonData}
                 tooltipValueLabel="farmers"
                 legendItems={registrationComparisonData}
+              />
+              <RecentFarmersPanel
+                farmers={overviewData.recentFarmers ?? EMPTY_OVERVIEW_DATA.recentFarmers}
+              />
+            </div>
+
+            {/* Row 2: Animal Census + Recently Visited Locations */}
+            <div className="grid items-stretch gap-6 lg:grid-cols-2">
+              <AnnualComparisonPanel
+                title="ANIMAL CENSUS"
+                comparison={overviewData.animalCensusComparison ?? EMPTY_OVERVIEW_DATA.animalCensusComparison}
               />
               <RecentLocationsPanel locations={overviewData.recentLocations ?? EMPTY_OVERVIEW_DATA.recentLocations} />
             </div>
@@ -2769,10 +2766,13 @@ const DashboardOverview = () => {
               <CountiesCoveredPanel data={overviewData.countyCoverage ?? EMPTY_COUNTY_COVERAGE} />
             </div>
 
-            {/* Row 4: Recently Registered Farmers + Recent Activities */}
+            {/* Row 4: Infrastructure + Recent Activities */}
             <div className="grid items-stretch gap-6 lg:grid-cols-2">
-              <RecentFarmersPanel
-                farmers={overviewData.recentFarmers ?? EMPTY_OVERVIEW_DATA.recentFarmers}
+              <DonutPanel
+                title="INFRASTRUCTURE"
+                data={maintainedInfrastructureData}
+                tooltipValueLabel="boreholes"
+                legendItems={maintainedInfrastructureData}
               />
               <RecentActivitiesPanel
                 activities={overviewData.recentActivities ?? EMPTY_OVERVIEW_DATA.recentActivities}

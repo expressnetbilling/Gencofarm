@@ -440,7 +440,7 @@ const ActivitiesPage = () => {
           </div>
           <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
             <DialogTrigger asChild>
-              {userIsAdmin ? (<Button className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white">
+              {userIsAdmin ? (<Button className="bg-green-600 text-white hover:bg-green-700">
                 <Plus className="h-4 w-4 mr-2" />
                 Schedule Activity
               </Button>) : <span className="hidden" />}
@@ -550,7 +550,7 @@ const ActivitiesPage = () => {
                       <Button 
                         type="button" 
                         onClick={handleAddParticipant}
-                        className="bg-blue-500 hover:bg-blue-600 text-white rounded-xl"
+                        className="bg-green-600 hover:bg-green-700 text-white rounded-xl"
                         disabled={!participantForm.name.trim() || !participantForm.role.trim()}
                       >
                         <Plus className="h-4 w-4" />
@@ -596,7 +596,7 @@ const ActivitiesPage = () => {
                 <Button 
                   onClick={handleAddActivity}
                   disabled={participants.length === 0}
-                  className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl text-white font-semibold shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
+                  className="bg-green-600 hover:bg-green-700 rounded-xl text-white font-semibold shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
                 >
                   <Calendar className="h-4 w-4 mr-2" />
                   Schedule Activity
@@ -609,15 +609,15 @@ const ActivitiesPage = () => {
         {/* Stats Overview — with left gradient borders */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
           <Card className="bg-white/95 backdrop-blur-sm relative overflow-hidden">
-            <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-blue-500 to-blue-700"></div>
+            <div className="absolute left-0 top-0 bottom-0 w-1 bg-gradient-to-b from-green-500 to-green-700"></div>
             <CardContent className="p-4 pl-6">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-slate-600">Total Activities</p>
                   <p className="text-2xl font-bold text-slate-900">{activities.length}</p>
                 </div>
-                <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
-                  <Calendar className="h-5 w-5 text-blue-600" />
+                <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+                  <Calendar className="h-5 w-5 text-green-600" />
                 </div>
               </div>
             </CardContent>
@@ -735,46 +735,46 @@ const ActivitiesPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-600 text-white text-xs">
-                      <th className="py-3 px-3 font-semibold text-white">Activity Name</th>
-                      <th className="py-3 px-3 font-semibold text-white">Date</th>
-                      <th className="py-3 px-3 font-semibold text-white">Programme</th>
-                      <th className="py-3 px-3 font-semibold text-white">Location</th>
-                      <th className="py-3 px-3 font-semibold text-white">County</th>
-                      <th className="py-3 px-3 font-semibold text-white">Participants</th>
-                      <th className="py-3 px-3 font-semibold text-white">Status</th>
-                      <th className="py-3 px-3 font-semibold text-white">Actions</th>
+                    <tr className="bg-green-100 text-green-900 text-xs">
+                      <th className="py-3 px-3 font-semibold text-green-900">Activity Name</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Date</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Programme</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Location</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">County</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Participants</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Status</th>
+                      <th className="py-3 px-3 font-semibold text-green-900">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredActivities.map((activity) => (
                       <tr
                         key={activity.id}
-                        className="border-b hover:bg-blue-50 transition-colors group"
+                        className="border-b hover:bg-green-50 transition-colors group"
                       >
-                        <td className="py-2 px-3 font-medium text-sm">{activity.activityName}</td>
+                        <td className="py-2 px-3 text-sm">{activity.activityName}</td>
                         <td className="py-2 px-3 text-xs text-gray-500">{formatDate(activity.date)}</td>
                         <td className="py-2 px-3 text-xs">
-                          <Badge variant="outline" className="font-semibold">
+                         
                             {getProgrammeLabel(activity.programme)}
-                          </Badge>
+                          
                         </td>
                         <td className="py-2 px-3 text-xs">{activity.location}</td>
                         <td className="py-2 px-3 text-xs">{activity.county}</td>
                         <td className="py-2 px-3">
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-blue-700">{activity.numberOfPersons}</span>
+                            <span className="text-xs font-semibold text-green-700">{activity.numberOfPersons}</span>
                             <Button
                               variant="ghost"
                               size="sm"
                               onClick={() => openParticipantsDialog(activity.participants || [])}
-                              className="h-7 text-xs text-blue-600 hover:bg-blue-50"
+                              className="h-7 text-xs text-green-700 hover:bg-green-50"
                             >
                               View
                             </Button>
                           </div>
                         </td>
-                        <td className="py-2 px-3">{getStatusBadge(activity.status)}</td>
+                        <td className="py-2 px-3">{activity.status}</td>
                         <td className="py-2 px-3">
                           {userIsAdmin ? (
                             <div className="flex gap-1">
@@ -782,7 +782,7 @@ const ActivitiesPage = () => {
                                 size="icon"
                                 variant="ghost"
                                 onClick={() => openEditDialog(activity)}
-                                className="h-7 w-7 text-blue-600 hover:bg-blue-50"
+                                className="h-7 w-7 text-green-700 hover:bg-green-50"
                               >
                                 <Edit className="h-3.5 w-3.5" />
                               </Button>
@@ -850,7 +850,7 @@ const ActivitiesPage = () => {
                 ) : hasProgrammeAccess ? (
                   <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
                     <DialogTrigger asChild>
-                      {userIsAdmin ? <Button className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white">
+                      {userIsAdmin ? <Button className="bg-green-600 text-white hover:bg-green-700">
                         <Plus className="h-4 w-4 mr-2" />
                         Schedule Your First Activity
                       </Button> : <span className="hidden" />}
@@ -970,7 +970,7 @@ const ActivitiesPage = () => {
                   <Button 
                     type="button" 
                     onClick={handleAddParticipant}
-                    className="bg-blue-500 hover:bg-blue-600 text-white rounded-xl"
+                    className="bg-green-600 hover:bg-green-700 text-white rounded-xl"
                     disabled={!participantForm.name.trim() || !participantForm.role.trim()}
                   >
                     <Plus className="h-4 w-4" />
@@ -1016,7 +1016,7 @@ const ActivitiesPage = () => {
             <Button 
               onClick={handleEditActivity}
               disabled={participants.length === 0}
-              className="bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 rounded-xl text-white font-semibold shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
+              className="bg-green-600 hover:bg-green-700 rounded-xl text-white font-semibold shadow-lg hover:shadow-xl transition-all disabled:opacity-50"
             >
               <Edit className="h-4 w-4 mr-2" />
               Update Activity

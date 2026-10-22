@@ -841,7 +841,10 @@ const BoreholePage = () => {
         drilled: status.drilled,
         equipped: status.equipped,    // Added Equipped
         maintained: status.maintained,
-        date: editingRecord.date // Pass existing date
+        // Stamp the record with today's date whenever it is edited, so the
+        // date column reflects the most recent update rather than the
+        // original creation date.
+        date: new Date().toISOString()
       };
 
       console.log("Updating borehole:", editingRecord.id, boreholeData);
@@ -1024,17 +1027,17 @@ const BoreholePage = () => {
 
         return [
           formatDateForExcel(record.date),
-          normalizeProgramme(record.programme),
+          record.county || 'N/A',       // County
+          record.subcounty || 'N/A',    // Sub-County
           record.location || 'N/A',
-          record.county || 'N/A',       // Added County
-          record.subcounty || 'N/A',    // Added Sub-County
           displayPeopleValue(record.people),
           safeWaterToInteger(record.waterUsed).toString(),
+          normalizeProgramme(record.programme),
           statusLabels
         ];
       });
 
-      const headers = ['Date', 'Programme', 'Borehole Location', 'County', 'Sub-County', 'People Using Water', 'Water Used', 'Status'];
+      const headers = ['Date', 'County', 'Sub-County', 'Borehole Location', 'Household', 'Capacity (L)', 'Programme', 'Status'];
       const csvContent = [
         headers.map(escapeCsvCell).join(','),
         ...csvData.map(row =>
@@ -1212,10 +1215,8 @@ const BoreholePage = () => {
   ), [filters, handleSearch, handleFilterChange]);
 
   const TableRow = useCallback(({ record }: { record: Borehole }) => {
-    const statuses = getRecordStatuses(record);
-
     return (
-      <tr className="border-b hover:bg-blue-50 transition-colors group">
+      <tr className="border-b hover:bg-green-50 transition-colors group">
         {[
           <td key="select" className="py-2 px-3">
             <Checkbox
@@ -1226,41 +1227,14 @@ const BoreholePage = () => {
             />
           </td>,
           <td key="date" className="py-2 px-3 text-xs text-gray-500">{formatDate(record.date)}</td>,
-          <td key="programme" className="py-2 px-3">
-            <Badge
-              variant="secondary"
-              className={
-                normalizeProgramme(record.programme) === "KPMD"
-                  ? "bg-indigo-100 text-indigo-800 w-fit text-[10px]"
-                  : "bg-teal-100 text-teal-800 w-fit text-[10px]"
-              }
-            >
-              {normalizeProgramme(record.programme)}
-            </Badge>
-          </td>,
-          <td key="location" className="py-2 px-3 font-medium text-sm">{record.location || "N/A"}</td>,
           <td key="county" className="py-2 px-3 text-xs">{record.county || "-"}</td>,
           <td key="subcounty" className="py-2 px-3 text-xs">{record.subcounty || "-"}</td>,
+          <td key="location" className="py-2 px-3 font-medium text-sm">{record.location || "N/A"}</td>,
           <td key="people" className="py-2 px-3">
-            <span className="text-xs font-semibold text-blue-700">{displayPeopleValue(record.people)}</span>
+            <span className="text-xs font-semibold text-green-700">{displayPeopleValue(record.people)}</span>
           </td>,
           <td key="waterUsed" className="py-2 px-3">
             <span className="text-xs font-semibold text-cyan-700">{safeWaterToInteger(record.waterUsed)} L</span>
-          </td>,
-          <td key="status" className="py-2 px-3">
-            <div className="flex flex-wrap gap-1">
-              {statuses.length > 0 ? (
-                statuses.map(status => (
-                  <Badge key={status.key} variant="secondary" className={`${status.className} w-fit text-[10px]`}>
-                    {status.label}
-                  </Badge>
-                ))
-              ) : (
-                <Badge variant="secondary" className="bg-gray-100 text-gray-800 w-fit text-[10px]">
-                  N/A
-                </Badge>
-              )}
-            </div>
           </td>,
           <td key="actions" className="py-2 px-3">
             <div className="flex gap-1">
@@ -1278,7 +1252,7 @@ const BoreholePage = () => {
                     variant="ghost"
                     size="icon"
                     onClick={() => openEditDialog(record)}
-                    className="h-7 w-7 text-blue-600 hover:bg-blue-50"
+                    className="h-7 w-7 text-green-700 hover:bg-green-50"
                   >
                     <Edit className="h-3.5 w-3.5" />
                   </Button>
@@ -1307,10 +1281,10 @@ const BoreholePage = () => {
       {/* Header with Action Buttons */}
       <div className="flex md:flex-row flex-col justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-xl font-bold mb-2 bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
+          <h2 className="text-xl font-bold mb-2 bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
             Borehole Data
           </h2>
-          <div className="bg-blue-50 text-blue-700 border-blue-200 text-xs w-fit px-2 py-1 rounded">
+          <div className="bg-green-50 text-green-700 border-green-200 text-xs w-fit px-2 py-1 rounded">
             {activeProgram || "No Access"} PROJECT
           </div>
         </div>
@@ -1366,7 +1340,7 @@ const BoreholePage = () => {
               
               <Button 
                 onClick={() => setIsUploadDialogOpen(true)}
-                className="bg-green-50 text-green-500 hover:bg-blue-50"
+                className="bg-green-50 text-green-700 hover:bg-green-100"
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Upload Data
@@ -1386,7 +1360,7 @@ const BoreholePage = () => {
               <Button 
                 onClick={handleExport} 
                 disabled={exportLoading || filteredBoreholes.length === 0}
-                className="bg-gradient-to-r from-blue-600 to-cyan-700 hover:from-blue-700 hover:to-cyan-800 text-white shadow-md text-xs"
+                className="bg-green-600 text-white shadow-md hover:bg-green-700 text-xs"
               >
                 <Download className="h-4 w-4 mr-2" />
                 {exportLoading ? "Exporting..." : `Export (${filteredBoreholes.length})`}
@@ -1460,7 +1434,7 @@ const BoreholePage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-50 text-xs">
+                    <tr className="bg-green-100 text-xs text-green-900">
                       {[
                         <th key="select" className="py-3 px-3">
                           <Checkbox
@@ -1470,15 +1444,13 @@ const BoreholePage = () => {
                           className={!canManageRecords ? "invisible" : ""}
                         />
                         </th>,
-                        <th key="date" className="py-3 px-3 font-semibold text-gray-700">Date</th>,
-                        <th key="programme" className="py-3 px-3 font-semibold text-gray-700">Programme</th>,
-                        <th key="location" className="py-3 px-3 font-semibold text-gray-700">Borehole Location</th>,
-                        <th key="county" className="py-3 px-3 font-semibold text-gray-700">County</th>,
-                        <th key="subcounty" className="py-3 px-3 font-semibold text-gray-700">Sub-County</th>,
-                        <th key="people" className="py-3 px-3 font-semibold text-gray-700">People</th>,
-                        <th key="waterUsed" className="py-3 px-3 font-semibold text-gray-700">Water Used</th>,
-                        <th key="status" className="py-3 px-3 font-semibold text-gray-700">Status</th>,
-                        <th key="actions" className="py-3 px-3 font-semibold text-gray-700">Actions</th>,
+                        <th key="date" className="py-3 px-3 font-semibold text-green-900">Date</th>,
+                        <th key="county" className="py-3 px-3 font-semibold text-green-900">County</th>,
+                        <th key="subcounty" className="py-3 px-3 font-semibold text-green-900">Sub-County</th>,
+                        <th key="location" className="py-3 px-3 font-semibold text-green-900">Borehole Location</th>,
+                        <th key="people" className="py-3 px-3 font-semibold text-green-900">Household</th>,
+                        <th key="waterUsed" className="py-3 px-3 font-semibold text-green-900">Capacity</th>,
+                        <th key="actions" className="py-3 px-3 font-semibold text-green-900">Actions</th>,
                       ]}
                     </tr>
                   </thead>
@@ -1526,7 +1498,7 @@ const BoreholePage = () => {
         <DialogContent className="sm:max-w-2xl bg-white rounded-2xl max-h-[90vh] overflow-hidden">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-slate-900">
-              <Eye className="h-5 w-5 text-blue-600" />
+              <Eye className="h-5 w-5 text-green-600" />
               Borehole Details
             </DialogTitle>
             <DialogDescription>
@@ -1551,16 +1523,16 @@ const BoreholePage = () => {
                     <p className="text-slate-900 font-medium">{normalizeProgramme(viewingRecord.programme)}</p>
                   </div>
                   <div>
-                    <Label className="text-sm font-medium text-slate-600">Borehole Location</Label>
-                    <p className="text-slate-900 font-medium">{viewingRecord.location || 'N/A'}</p>
-                  </div>
-                  <div>
                     <Label className="text-sm font-medium text-slate-600">County</Label>
                     <p className="text-slate-900 font-medium">{viewingRecord.county || 'N/A'}</p>
                   </div>
                   <div>
                     <Label className="text-sm font-medium text-slate-600">Sub-County</Label>
                     <p className="text-slate-900 font-medium">{viewingRecord.subcounty || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <Label className="text-sm font-medium text-slate-600">Borehole Location</Label>
+                    <p className="text-slate-900 font-medium">{viewingRecord.location || 'N/A'}</p>
                   </div>
                 </div>
               </div>
@@ -1573,13 +1545,13 @@ const BoreholePage = () => {
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <Label className="text-sm font-medium text-slate-600">People Using Water</Label>
-                    <p className="text-slate-900 font-medium text-lg font-bold text-blue-700">
+                    <Label className="text-sm font-medium text-slate-600">Household</Label>
+                    <p className="text-slate-900 font-medium text-lg font-bold text-green-700">
                       {displayPeopleValue(viewingRecord.people)}
                     </p>
                   </div>
                   <div>
-                    <Label className="text-sm font-medium text-slate-600">Water Used</Label>
+                    <Label className="text-sm font-medium text-slate-600">Capacity</Label>
                     <p className="text-slate-900 font-medium text-lg font-bold text-cyan-700">
                       {safeWaterToInteger(viewingRecord.waterUsed)} liters
                     </p>
@@ -1636,7 +1608,7 @@ const BoreholePage = () => {
           <DialogFooter>
             <Button 
               onClick={() => setIsViewDialogOpen(false)}
-              className="bg-gradient-to-r from-blue-500 to-cyan-600 hover:from-blue-600 hover:to-cyan-700 text-white"
+              className="bg-green-600 text-white hover:bg-green-700"
             >
               Close
             </Button>
@@ -1690,17 +1662,6 @@ const BoreholePage = () => {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="create-location" className="font-semibold text-gray-700">Borehole Location *</Label>
-              <Input
-                id="create-location"
-                placeholder="e.g. Village Name"
-                value={newBorehole.location || ''}
-                onChange={(e) => setNewBorehole(prev => ({ ...prev, location: e.target.value }))}
-                className="border-gray-300 focus:border-blue-500 focus:ring-blue-500 bg-white"
-              />
-            </div>
-
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="create-county" className="font-semibold text-gray-700">County</Label>
@@ -1725,9 +1686,20 @@ const BoreholePage = () => {
               </div>
             </div>
 
+            <div className="space-y-2">
+              <Label htmlFor="create-location" className="font-semibold text-gray-700">Borehole Location *</Label>
+              <Input
+                id="create-location"
+                placeholder="e.g. Village Name"
+                value={newBorehole.location || ''}
+                onChange={(e) => setNewBorehole(prev => ({ ...prev, location: e.target.value }))}
+                className="border-gray-300 focus:border-blue-500 focus:ring-blue-500 bg-white"
+              />
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="create-people" className="font-semibold text-gray-700">People Using Water</Label>
+                <Label htmlFor="create-people" className="font-semibold text-gray-700">Household</Label>
                 <Input
                   id="create-people"
                   type="number"
@@ -1739,7 +1711,7 @@ const BoreholePage = () => {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="create-water" className="font-semibold text-gray-700">Water Used (L)</Label>
+                <Label htmlFor="create-water" className="font-semibold text-gray-700">Capacity (L)</Label>
                 <Input
                   id="create-water"
                   type="number"
@@ -1833,25 +1805,27 @@ const BoreholePage = () => {
       <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
         <DialogContent className="sm:max-w-md bg-white rounded-2xl">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-blue-600">
+            <DialogTitle className="flex items-center gap-2 text-green-600">
               <Edit className="h-5 w-5" />
               Edit Borehole
             </DialogTitle>
             <DialogDescription>
-              Update the borehole record information
+              Update the borehole record information. The record's date will be updated to today to reflect when this change was made.
             </DialogDescription>
           </DialogHeader>
           
           {editingRecord && (
             <div className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="edit-date" className="font-semibold text-gray-700">Date</Label>
+                <Label htmlFor="edit-date" className="font-semibold text-gray-700">
+                  Date <span className="font-normal text-xs text-gray-500">(will update to today on save)</span>
+                </Label>
                 <Input
                   id="edit-date"
                   type="date"
-                  value={formatDate(editingRecord.date).split(' ').reverse().join('-')}
-                  onChange={(e) => setEditingRecord(prev => prev ? { ...prev, date: new Date(e.target.value) } : null)}
-                  className="border-gray-300 focus:border-blue-500 focus:ring-blue-500 bg-white"
+                  value={formatDateToLocal(new Date())}
+                  disabled
+                  className="border-gray-300 bg-gray-100 text-gray-500"
                 />
               </div>
 
@@ -1874,17 +1848,6 @@ const BoreholePage = () => {
                     ))}
                   </SelectContent>
                 </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="edit-location" className="font-semibold text-gray-700">Borehole Location *</Label>
-                <Input
-                  id="edit-location"
-                  placeholder="Enter borehole location"
-                  value={editingRecord.location || ''}
-                  onChange={(e) => setEditingRecord(prev => prev ? { ...prev, location: e.target.value } : null)}
-                  className="border-gray-300 focus:border-blue-500 focus:ring-blue-500 bg-white"
-                />
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1911,9 +1874,20 @@ const BoreholePage = () => {
                 </div>
               </div>
 
+              <div className="space-y-2">
+                <Label htmlFor="edit-location" className="font-semibold text-gray-700">Borehole Location *</Label>
+                <Input
+                  id="edit-location"
+                  placeholder="Enter borehole location"
+                  value={editingRecord.location || ''}
+                  onChange={(e) => setEditingRecord(prev => prev ? { ...prev, location: e.target.value } : null)}
+                  className="border-gray-300 focus:border-blue-500 focus:ring-blue-500 bg-white"
+                />
+              </div>
+
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="edit-people" className="font-semibold text-gray-700">People Using Water</Label>
+                  <Label htmlFor="edit-people" className="font-semibold text-gray-700">Household</Label>
                   <Input
                     id="edit-people"
                     type="number"
@@ -1925,7 +1899,7 @@ const BoreholePage = () => {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="edit-water" className="font-semibold text-gray-700">Water Used (L)</Label>
+                  <Label htmlFor="edit-water" className="font-semibold text-gray-700">Capacity (L)</Label>
                   <Input
                     id="edit-water"
                     type="number"
@@ -2009,7 +1983,7 @@ const BoreholePage = () => {
             <Button
               onClick={handleEditBorehole}
               disabled={editLoading || !editingRecord?.location}
-              className="bg-gradient-to-r from-blue-600 to-cyan-700 hover:from-blue-700 hover:to-cyan-800 text-white"
+              className="bg-green-600 text-white hover:bg-green-700"
             >
               {editLoading ? "Updating..." : "Update Borehole"}
             </Button>
@@ -2061,7 +2035,6 @@ const BoreholePage = () => {
               Ensure your file includes columns for <strong>BoreholeLocation, County, Sub-County</strong>, and other required fields.
             </DialogDescription>
           </DialogHeader>
-          
           <div className="space-y-4">
             <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center">
               <input
@@ -2134,8 +2107,7 @@ const BoreholePage = () => {
             <Button
               onClick={handleUpload}
               disabled={!uploadFile || uploadLoading}
-              className="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white"
-            >
+              className="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white">
               {uploadLoading ? "Uploading..." : "Upload Data"}
             </Button>
           </DialogFooter>

@@ -44,7 +44,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendEmail = exports.getDb = void 0;
+exports.downloadCapacityDocument = exports.sendEmail = exports.getDb = void 0;
 const admin = __importStar(require("firebase-admin"));
 // ---------------------------------------------------------------------------
 // Admin SDK Initialization (singleton)
@@ -59,3 +59,5 @@ exports.getDb = getDb;
 // Re-export the sendEmail function from its own module
 var send_email_1 = require("./send-email");
 Object.defineProperty(exports, "sendEmail", { enumerable: true, get: function () { return send_email_1.sendEmail; } });
+var download_capacity_document_1 = require("./download-capacity-document");
+Object.defineProperty(exports, "downloadCapacityDocument", { enumerable: true, get: function () { return download_capacity_document_1.downloadCapacityDocument; } });

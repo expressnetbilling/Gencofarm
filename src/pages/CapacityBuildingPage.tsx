@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef, ChangeEvent } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { db, ref, set, update, remove, push, subscribeCollectionByProgramme, subscribeCollectionByProgrammes, uploadFileToStorage } from "@/lib/firebase";
+import { auth, db, firebaseConfig, ref, set, update, remove, push, subscribeCollectionByProgramme, subscribeCollectionByProgrammes, uploadFileToStorage } from "@/lib/firebase";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -16,12 +16,13 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   Download, Users, BookOpen, Edit, Trash2, Calendar, Eye, MapPin,
-  Upload, User, UserCircle, MoreHorizontal, FileText, ExternalLink,
+  Upload, User, UserCircle, MoreHorizontal, FileText, ExternalLink, FileStack,
 } from "lucide-react";
 import { useSharedProgrammeSelection } from "@/hooks/use-shared-programme-selection";
 import { useToast } from "@/hooks/use-toast";
 import { canViewAllProgrammes, isAdmin } from "@/contexts/authhelper";
 import { ALL_PROGRAMMES_VALUE, matchesActiveProgramme, normalizeProgramme, resolveAccessibleProgrammes, resolveActiveProgramme } from "@/lib/programme-access";
+import { PDFDocument, type PDFImage } from "pdf-lib";
 
 // ──────────────────────────────────────────────
 // Utility: Format large numbers
@@ -57,10 +58,6 @@ interface WeeklyReportEntry {
   youthFarmers?: number;
   county?: string;
   subcounty?: string;
-  adultFarmers?: number;
-  maleFarmers?: number;
-  femaleFarmers?: number;
-  youthFarmers?: number;
 }
 
 /** Metadata about the uploaded PDF file. */
@@ -101,6 +98,8 @@ interface TrainingRecord {
   region?: string;
   maleFarmers?: number;
   femaleFarmers?: number;
+  adultFarmers?: number;
+  youthFarmers?: number;
 
   // ── Weekly capacity report fields ──
   recordType?: string;           // e.g. "weeklyCapacityReport"
@@ -178,7 +177,7 @@ const PAGE_LIMIT = 15;
 const EXPORT_HEADERS = [
   "Date Created", "Report ID", "Topic/Module", "County", "Subcounty",
   "Village", "Start Date", "End Date", "Total Farmers",
-  "Officer", "Programme", "PDF Link",
+  "Trainer", "Programme", "PDF Link",
 ];
 
 const INVALID_FIREBASE_KEY_CHARS = /[.#$/[\]]/g;
@@ -364,6 +363,91 @@ const getRecordPdfName = (record: TrainingRecord | null | undefined): string => 
 const sanitizeStorageSegment = (value: string): string =>
   value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "document";
 
+const getStoragePathFromDownloadUrl = (url: string): string => {
+  try {
+    const match = new URL(url).pathname.match(/\/o\/([^/]+)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  } catch {
+    return "";
+  }
+};
+
+const capacityDocumentProxyUrl = `https://us-central1-${firebaseConfig.projectId}.cloudfunctions.net/downloadCapacityDocument`;
+
+// ──────────────────────────────────────────────
+// NEW: Document-type sniffing for the bulk PDF merge.
+// Most "validation documents" in this app are actually photos of
+// handwritten attendance sheets (JPEG/PNG) captured on mobile, not real
+// PDFs — pdf-lib's PDFDocument.load() only understands genuine PDF byte
+// streams, so we check the file's magic bytes first and route accordingly.
+// ──────────────────────────────────────────────
+
+/** PDF files start with the ASCII bytes "%PDF-". */
+const isPdfBytes = (bytes: Uint8Array): boolean =>
+  bytes.length > 4 &&
+  bytes[0] === 0x25 &&
+  bytes[1] === 0x50 &&
+  bytes[2] === 0x44 &&
+  bytes[3] === 0x46;
+
+/** PNG files start with the fixed 8-byte PNG signature. */
+const isPngBytes = (bytes: Uint8Array): boolean =>
+  bytes.length > 8 &&
+  bytes[0] === 0x89 &&
+  bytes[1] === 0x50 &&
+  bytes[2] === 0x4e &&
+  bytes[3] === 0x47;
+
+/** JPEG files start with the SOI marker 0xFFD8FF. */
+const isJpgBytes = (bytes: Uint8Array): boolean =>
+  bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+
+const getImageMimeType = (bytes: Uint8Array): string | null => {
+  if (isPngBytes(bytes)) return "image/png";
+  if (isJpgBytes(bytes)) return "image/jpeg";
+  if (bytes.length > 12 && String.fromCharCode(...bytes.slice(0, 4)) === "RIFF" && String.fromCharCode(...bytes.slice(8, 12)) === "WEBP") return "image/webp";
+  if (bytes.length > 6 && String.fromCharCode(...bytes.slice(0, 6)) === "GIF87a") return "image/gif";
+  if (bytes.length > 6 && String.fromCharCode(...bytes.slice(0, 6)) === "GIF89a") return "image/gif";
+  if (bytes.length > 2 && bytes[0] === 0x42 && bytes[1] === 0x4d) return "image/bmp";
+  if (bytes.length > 12 && String.fromCharCode(...bytes.slice(4, 12)).startsWith("ftyp")) return "image/avif";
+  return null;
+};
+
+const toArrayBuffer = (bytes: Uint8Array): ArrayBuffer => {
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+};
+
+const embedValidationImage = async (pdf: PDFDocument, bytes: Uint8Array): Promise<PDFImage> => {
+  if (isPngBytes(bytes)) return pdf.embedPng(bytes);
+  if (isJpgBytes(bytes)) return pdf.embedJpg(bytes);
+
+  const mimeType = getImageMimeType(bytes);
+  if (!mimeType) throw new Error("Unrecognized validation-document image format");
+
+  const blobUrl = URL.createObjectURL(new Blob([toArrayBuffer(bytes)], { type: mimeType }));
+  try {
+    const image = new Image();
+    image.src = blobUrl;
+    await image.decode();
+
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Unable to prepare validation-document image");
+    context.drawImage(image, 0, 0);
+
+    const pngBlob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob((result) => result ? resolve(result) : reject(new Error("Unable to convert validation-document image")), "image/png");
+    });
+    return pdf.embedPng(await pngBlob.arrayBuffer());
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+};
+
 const normalizeGeneratedDate = (
   raw: Record<string, unknown>,
   fallbackCreatedAt: unknown,
@@ -388,6 +472,7 @@ const normalizeGeneratedDate = (
 // ──────────────────────────────────────────────
 // Normalisation: weekly capacity report -> flat
 // ──────────────────────────────────────────────
+
 
 /**
  * Takes a raw Firebase snapshot value and returns a normalised TrainingRecord.
@@ -462,6 +547,7 @@ const normalizeRecord = (
       ]),
       documentPdfUrl: getStringField(raw, ["documentPdfUrl", "documentPdfURL"]),
       pdfDownloadUrl: getStringField(raw, ["pdfDownloadUrl", "pdfDownloadURL"]),
+      pdfStoragePath: getStringField(raw, ["pdfStoragePath"]),
       pdfFile: (raw.pdfFile as PdfFileInfo) || null,
       generatedAt: Number(raw.generatedAt) || 0,
       uploadedAtISO: getStringField(raw, ["uploadedAtISO", "uploadedAt"]),
@@ -543,6 +629,11 @@ const CapacityBuildingPage = () => {
   const [exportLoading, setExportLoading] = useState(false);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
+
+  // NEW: bulk validation-document (PDF) merge/download loading state,
+  // plus progress so the button can show "Merging 3 / 8..."
+  const [bulkPdfLoading, setBulkPdfLoading] = useState(false);
+  const [bulkPdfProgress, setBulkPdfProgress] = useState<{ done: number; total: number } | null>(null);
 
   // UI State
   const [selectedRecords, setSelectedRecords] = useState<string[]>([]);
@@ -924,6 +1015,198 @@ const CapacityBuildingPage = () => {
     },
     [pdfRecord],
   );
+
+  // ────────────────────────────────────────────────────────────────────
+  // FIX (CORS): Firebase Storage's REST download endpoint only returns
+  // permissive CORS headers if the *bucket* has a CORS config allowing
+  // your origin. A raw `fetch(pdfUrl)` from the browser is subject to
+  // that config and fails with a CORS error if it's missing/incomplete —
+  // that's exactly what "Merge failed... CORS restriction" means.
+  //
+  // The Storage SDK's `getBytes()` talks to the same REST endpoint, so it
+  // does NOT bypass bucket CORS on its own — but it lets us fetch by
+  // storage path instead of by signed URL, which sidesteps URL-shape
+  // issues (expired tokens, wrong host, mobile-uploaded gs:// links) that
+  // are a common secondary cause of these failures. The real, durable fix
+  // is enabling CORS on the bucket itself — see the note in the catch
+  // block below for the exact command.
+  // ────────────────────────────────────────────────────────────────────
+  const fetchPdfBytes = useCallback(async (record: TrainingRecord): Promise<Uint8Array> => {
+    const pdfUrl = getRecordPdfUrl(record);
+    if (!pdfUrl) throw new Error("No PDF URL available for this record");
+
+    const storagePath = record.pdfStoragePath || getStoragePathFromDownloadUrl(pdfUrl);
+    const token = await auth.currentUser?.getIdToken();
+
+    if (storagePath && token) {
+      const response = await fetch(capacityDocumentProxyUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ storagePath }),
+      });
+      if (!response.ok) throw new Error(`Document download failed (HTTP ${response.status})`);
+      return new Uint8Array(await response.arrayBuffer());
+    }
+
+    const response = await fetch(pdfUrl, { mode: "cors" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }, []);
+
+  // ────────────────────────────────────────────────────────────────────
+  // Bulk download — merges every selected record's validation PDF
+  // into a single combined PDF document and downloads it as one file.
+  // Uses pdf-lib entirely client-side (no server round trip). Records
+  // without a PDF, or whose PDF fails to fetch/parse, are skipped and
+  // reported to the user rather than aborting the whole merge.
+  // ────────────────────────────────────────────────────────────────────
+  const handleBulkDownloadMergedPdf = useCallback(async () => {
+    if (selectedRecords.length === 0) {
+      toastRef.current({
+        title: "No records selected",
+        description: "Select one or more records first.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const selectedSet = new Set(selectedRecords);
+    const candidates = filteredRecords.filter((r) => selectedSet.has(r.id));
+    const withPdf = candidates.filter((r) => !!getRecordPdfUrl(r) || !!r.pdfStoragePath);
+
+    if (withPdf.length === 0) {
+      toastRef.current({
+        title: "No validation documents",
+        description: "None of the selected records have an attached validation document.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setBulkPdfLoading(true);
+    setBulkPdfProgress({ done: 0, total: withPdf.length });
+
+    const failed: string[] = [];
+    // NEW: remember the first concrete error so the toast can tell the user
+    // (and you, in prod) *why* it failed instead of just "could not read".
+    let firstErrorMessage = "";
+    let likelyCorsIssue = false;
+
+    try {
+      const mergedPdf = await PDFDocument.create();
+      // A4 in points — used as a consistent page size for embedded photos.
+      const PAGE_WIDTH = 595.28;
+      const PAGE_HEIGHT = 841.89;
+      const PAGE_MARGIN = 24;
+
+      for (let i = 0; i < withPdf.length; i++) {
+        const record = withPdf[i];
+        try {
+          const bytes = await fetchPdfBytes(record);
+
+          if (isPdfBytes(bytes)) {
+            // Genuine PDF (e.g. uploaded via the admin "Upload PDF" dialog) —
+            // copy all of its pages across as-is.
+            const donorPdf = await PDFDocument.load(bytes, {
+              ignoreEncryption: true,
+            });
+            const pageIndices = donorPdf.getPageIndices();
+            const copiedPages = await mergedPdf.copyPages(donorPdf, pageIndices);
+            copiedPages.forEach((page) => mergedPdf.addPage(page));
+          } else {
+            // A photographed / handwritten sheet — embed the image onto its
+            // own page, scaled down to fit while preserving aspect ratio.
+            const image = await embedValidationImage(mergedPdf, bytes);
+
+            const availableWidth = PAGE_WIDTH - PAGE_MARGIN * 2;
+            const availableHeight = PAGE_HEIGHT - PAGE_MARGIN * 2;
+            const scale = Math.min(
+              availableWidth / image.width,
+              availableHeight / image.height,
+              1, // never upscale a small photo
+            );
+            const drawWidth = image.width * scale;
+            const drawHeight = image.height * scale;
+
+            const page = mergedPdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+            page.drawImage(image, {
+              x: (PAGE_WIDTH - drawWidth) / 2,
+              y: (PAGE_HEIGHT - drawHeight) / 2,
+              width: drawWidth,
+              height: drawHeight,
+            });
+          }
+        } catch (err) {
+          console.error(`Failed to merge document for record ${record.id}:`, err);
+          failed.push(record.reportId || record.topicTrained || record.id);
+          if (!firstErrorMessage) {
+            firstErrorMessage = err instanceof Error ? err.message : String(err);
+            // A bare "Failed to fetch" TypeError with no HTTP status almost
+            // always means the browser blocked the cross-origin read (CORS)
+            // rather than the request failing server-side.
+            if (err instanceof TypeError && /fetch/i.test(err.message)) {
+              likelyCorsIssue = true;
+            }
+          }
+        } finally {
+          setBulkPdfProgress({ done: i + 1, total: withPdf.length });
+        }
+      }
+
+      if (mergedPdf.getPageCount() === 0) {
+        toastRef.current({
+          title: "Merge failed",
+          description: likelyCorsIssue
+            ? "Could not read the validation documents — the storage bucket's CORS config doesn't allow this site. Ask whoever manages Firebase to run: gsutil cors set cors.json gs://<your-bucket>, with cors.json allowing this origin for GET. See console for details."
+            : `Could not read any of the selected validation documents${
+                firstErrorMessage ? ` (${firstErrorMessage})` : ""
+              }.`,
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const mergedBytes = await mergedPdf.save();
+      // FIX TS2322: pdf-lib's Uint8Array is typed against ArrayBufferLike
+      // (which admits SharedArrayBuffer), which the DOM lib's BlobPart type
+      // rejects. Copy into a plain, freshly-allocated ArrayBuffer first.
+      const mergedBuffer = new ArrayBuffer(mergedBytes.byteLength);
+      new Uint8Array(mergedBuffer).set(mergedBytes);
+      const blob = new Blob([mergedBuffer], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `validation-documents-${activeProgram || "all"}-${new Date()
+        .toISOString()
+        .split("T")[0]}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      const mergedCount = withPdf.length - failed.length;
+      toastRef.current({
+        title: "Documents merged",
+        description:
+          failed.length > 0
+            ? `Combined ${mergedCount} of ${withPdf.length} PDFs (${mergedPdf.getPageCount()} pages). ${failed.length} could not be read${likelyCorsIssue ? " — likely a storage CORS restriction." : "."}`
+            : `Combined ${mergedCount} PDFs into one file (${mergedPdf.getPageCount()} pages).`,
+      });
+    } catch (error) {
+      console.error(error);
+      toastRef.current({
+        title: "Error",
+        description: "Failed to merge and download validation documents.",
+        variant: "destructive",
+      });
+    } finally {
+      setBulkPdfLoading(false);
+      setBulkPdfProgress(null);
+    }
+  }, [selectedRecords, filteredRecords, activeProgram, fetchPdfBytes]);
 
   const openPdfUploadDialog = useCallback(
     (record: TrainingRecord) => {
@@ -1376,6 +1659,16 @@ const CapacityBuildingPage = () => {
     [allRecords],
   );
 
+  // NEW: how many of the currently selected records actually have a PDF
+  // attached — used to label / disable the bulk-download button sensibly.
+  const selectedPdfCount = useMemo(() => {
+    if (selectedRecords.length === 0) return 0;
+    const selectedSet = new Set(selectedRecords);
+    return filteredRecords.filter(
+      (r) => selectedSet.has(r.id) && (!!getRecordPdfUrl(r) || !!r.pdfStoragePath),
+    ).length;
+  }, [selectedRecords, filteredRecords]);
+
   // ────────────────────────────────────────────
   // Render
   // ────────────────────────────────────────────
@@ -1385,13 +1678,13 @@ const CapacityBuildingPage = () => {
       {/* ─── Header ─── */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div className="flex flex-col gap-1">
-          <h2 className="text-xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+          <h2 className="text-xl font-bold bg-gradient-to-r from-green-600 to-emerald-700 bg-clip-text text-transparent">
             Capacity Building
           </h2>
           <div className="flex items-center gap-2">
             <Badge
               variant="outline"
-              className="bg-blue-50 text-blue-700 border-blue-200 font-bold px-3 py-1 w-fit"
+              className="bg-green-50 text-green-700 border-green-200 font-bold px-3 py-1 w-fit"
             >
               {activeProgram || "No Access"} PROGRAMME
             </Badge>
@@ -1399,6 +1692,27 @@ const CapacityBuildingPage = () => {
         </div>
 
         <div className="flex flex-wrap gap-2">
+          {selectedRecords.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleBulkDownloadMergedPdf}
+              disabled={bulkPdfLoading || selectedPdfCount === 0}
+              className="border-red-300 text-red-700"
+              title={
+                selectedPdfCount === 0
+                  ? "None of the selected records have a validation document"
+                  : "Download all selected validation documents merged into one PDF"
+              }
+            >
+              <FileStack className="h-4 w-4 mr-2" />
+              {bulkPdfLoading
+                ? bulkPdfProgress
+                  ? `Merging ${bulkPdfProgress.done}/${bulkPdfProgress.total}...`
+                  : "Merging..."
+                : `Download Documents (${selectedPdfCount})`}
+            </Button>
+          )}
           {selectedRecords.length > 0 && userIsAdmin && (
             <Button
               variant="destructive"
@@ -1471,7 +1785,7 @@ const CapacityBuildingPage = () => {
               <Button
                 onClick={handleExport}
                 disabled={exportLoading || filteredRecords.length === 0}
-                className="bg-gradient-to-r from-blue-800 to-purple-600 text-white"
+              className="bg-green-600 text-white shadow-md hover:bg-green-700"
               >
                 <Download className="h-4 w-4 mr-2" /> Export ({filteredRecords.length})
               </Button>
@@ -1502,12 +1816,11 @@ const CapacityBuildingPage = () => {
         />
       </div>
 
-      {/* ─── Filters ─── */}
+      {/* ─── Filters (labels intentionally removed — inputs carry their own placeholders) ─── */}
       <Card className="shadow-lg bg-white">
         <CardContent className="pt-6">
           <ScrollableFilterBar ariaLabel="Capacity building filters" contentClassName="sm:grid-cols-2 lg:grid-cols-3">
             <div className="w-[240px] shrink-0 space-y-2 sm:w-auto">
-              <Label>Search</Label>
               <Input
                 placeholder="Topic, county, officer, report ID..."
                 value={searchValue}
@@ -1515,7 +1828,6 @@ const CapacityBuildingPage = () => {
               />
             </div>
             <div className="w-[190px] shrink-0 space-y-2 sm:w-auto">
-              <Label>County</Label>
               <Select
                 value={filters.region}
                 onValueChange={(v) => handleFilterChange("region", v)}
@@ -1534,7 +1846,6 @@ const CapacityBuildingPage = () => {
               </Select>
             </div>
             <div className="w-[280px] shrink-0 space-y-2 sm:w-auto">
-              <Label>Date Range</Label>
               <div className="flex gap-2">
                 <Input
                   type="date"
@@ -1590,7 +1901,7 @@ const CapacityBuildingPage = () => {
               <div className="w-full overflow-x-auto rounded-md">
                 <table className="w-full border-collapse border border-gray-300 text-sm text-left whitespace-nowrap">
                   <thead>
-                    <tr className="bg-blue-50 text-xs">
+                    <tr className="bg-green-100 text-xs text-green-900">
                       <th className="py-3 px-3">
                         <Checkbox
                           checked={
@@ -1601,22 +1912,25 @@ const CapacityBuildingPage = () => {
                           onCheckedChange={handleSelectAll}
                         />
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         Date
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         County
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                      <th className="py-3 px-3 font-semibold text-green-900">
+                        Subcounty
+                      </th>
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         Location
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         Farmers
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
-                        Officer
+                      <th className="py-3 px-3 font-semibold text-green-900">
+                        Trainer
                       </th>
-                      <th className="py-3 px-3 font-semibold text-gray-700">
+                      <th className="py-3 px-3 font-semibold text-green-900">
                         Actions
                       </th>
                     </tr>
@@ -1625,7 +1939,7 @@ const CapacityBuildingPage = () => {
                     {currentPageRecords.map((record) => (
                       <tr
                         key={record.id}
-                        className="border-b hover:bg-blue-50 transition-colors group"
+                        className="border-b hover:bg-green-50 transition-colors group"
                       >
                         <td className="py-2 px-3">
                           <Checkbox
@@ -1642,7 +1956,10 @@ const CapacityBuildingPage = () => {
                           {record.county || record.region || "N/A"}
                         </td>
                         <td className="py-2 px-3 text-xs">
-                          {record.subcounty || record.location || "N/A"}
+                          {record.subcounty || "N/A"}
+                        </td>
+                        <td className="py-2 px-3 text-xs">
+                          {record.location || "N/A"}
                         </td>
                         <td className="py-2 px-3">
                           <Badge variant="outline" className="text-[10px]">
@@ -1781,7 +2098,7 @@ const CapacityBuildingPage = () => {
                 )}
                 <Badge
                   variant="secondary"
-                  className="bg-blue-100 text-blue-800 text-xs font-semibold px-2.5 py-0.5"
+                  className="bg-green-100 text-green-800 text-xs font-semibold px-2.5 py-0.5"
                 >
                   {viewingRecord?.programme || activeProgram}
                 </Badge>
@@ -1798,7 +2115,7 @@ const CapacityBuildingPage = () => {
               {viewingRecord.reportId && (
                 <div className="border border-slate-200 rounded-xl bg-slate-50 p-4">
                   <div className="flex items-center gap-2 mb-1">
-                    <BookOpen className="h-3.5 w-3.5 text-blue-500" />
+                    <BookOpen className="h-3.5 w-3.5 text-green-600" />
                     <Label className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
                       Report ID
                     </Label>
@@ -1845,7 +2162,7 @@ const CapacityBuildingPage = () => {
                 </div>
                 <div className="border border-slate-200 rounded-xl bg-slate-50 p-4">
                   <div className="flex items-center gap-2 mb-1">
-                    <MapPin className="h-3.5 w-3.5 text-blue-500" />
+                    <MapPin className="h-3.5 w-3.5 text-green-600" />
                     <Label className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
                       Subcounty
                     </Label>
@@ -1873,7 +2190,7 @@ const CapacityBuildingPage = () => {
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="border border-slate-200 rounded-xl bg-slate-50 p-4">
                   <div className="flex items-center gap-2 mb-1">
-                    <Calendar className="h-3.5 w-3.5 text-blue-500" />
+                    <Calendar className="h-3.5 w-3.5 text-green-600" />
                     <Label className="text-xs text-slate-500 uppercase tracking-wide font-semibold">
                       Start Date
                     </Label>
@@ -1946,12 +2263,12 @@ const CapacityBuildingPage = () => {
                     {formatNumber(viewingRecord.youthFarmers || 0)}
                   </p>
                 </div>
-                <div className="border border-blue-100 rounded-xl bg-blue-50 p-4 text-center">
-                  <UserCircle className="h-5 w-5 text-blue-500 mx-auto mb-1" />
-                  <Label className="text-xs text-blue-600 uppercase tracking-wide font-semibold">
-                    Officer
+                <div className="border border-green-100 rounded-xl bg-green-50 p-4 text-center">
+                  <UserCircle className="h-5 w-5 text-green-600 mx-auto mb-1" />
+                  <Label className="text-xs text-green-700 uppercase tracking-wide font-semibold">
+                    Trainer
                   </Label>
-                  <p className="text-sm font-bold text-blue-700 mt-1">
+                  <p className="text-sm font-bold text-green-700 mt-1">
                     {viewingRecord.fieldOfficer ||
                       viewingRecord.username ||
                       "N/A"}
@@ -2171,7 +2488,7 @@ const CapacityBuildingPage = () => {
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <Label>Officer Name</Label>
+                <Label>Trainer Name</Label>
                 <Input
                   value={editForm.Name}
                   onChange={(e) =>

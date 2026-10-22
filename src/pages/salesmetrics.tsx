@@ -11,13 +11,14 @@ import { db, fetchCollectionByProgrammes, ref, query, orderByChild, equalTo, get
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  XAxis, YAxis, CartesianGrid, AreaChart, Area, Legend
+  XAxis, YAxis, CartesianGrid, AreaChart, Area, Legend,
+  BarChart, Bar, LineChart, Line
 } from "recharts";
 import {
   Beef, TrendingUp, Award, Star,
   MapPin, DollarSign, Package, Users, Loader2, Calendar,
   Zap, ChevronDown, Calculator, ChevronLeft, ChevronRight,
-  ClipboardList
+  ClipboardList, History
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,6 +42,7 @@ import {
   normalizeProgramme,
   resolveAccessibleProgrammes,
 } from "@/lib/programme-access";
+import Chart from "react-apexcharts";
 
 
 const COLORS = {
@@ -80,12 +82,24 @@ const ALL_MONTHS = [
 ] as const;
 
 const ALL_YEARS_OPTION = "all";
+const ALL_COUNTIES_OPTION = "all_counties";
+
+const normalizeCountyFilterValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const matchesCountySelection = (recordCounty: unknown, selectedCounty: string): boolean => {
+  if (!selectedCounty || selectedCounty === ALL_COUNTIES_OPTION) return true;
+  const county = normalizeCountyFilterValue(recordCounty);
+  return county ? county === normalizeCountyFilterValue(selectedCounty) : true;
+};
 
 const SALES_INPUTS_STORAGE_KEY = "sales-metrics-inputs-v1";
 
 const USE_REMOTE_ANALYTICS = false;
 
-const SALES_ANALYTICS_QUERY_VERSION = "v6";
+const SALES_ANALYTICS_QUERY_VERSION = "v7";
+
+const RECENT_OFFTAKES_LIMIT = 6;
 
 // ---------------------------------------------------------------------------
 // Sales prices are stored separately for the mobile app.
@@ -185,6 +199,23 @@ interface TrendSeriesMeta {
   color: string;
 }
 
+interface CountyGenderPoint {
+  name: string;
+  Male: number;
+  Female: number;
+}
+
+interface RecentOfftakeItem {
+  id: string;
+  name: string;
+  county: string;
+  location: string;
+  animals: number;
+  purchaseCost: number;
+  dateLabel: string;
+  sortTime: number;
+}
+
 interface SalesAnalyticsPayload {
   filteredCount: number;
   stats: {
@@ -212,6 +243,7 @@ interface SalesAnalyticsPayload {
   };
   genderData: Array<{ name: string; value: number }>;
   countyData: Array<{ name: string; count: number }>;
+  countyGenderData: CountyGenderPoint[];
   topLocations: Array<{ name: string; count: number }>;
   topFarmers: Array<{
     name: string;
@@ -222,10 +254,12 @@ interface SalesAnalyticsPayload {
     county: string;
     records: number;
   }>;
+  recentOfftakes: RecentOfftakeItem[];
   monthlyTrend: TrendPoint[];
   monthlyTrendSeries: TrendSeriesMeta[];
   orderPurchaseComparison: Array<{
     month: string;
+    county: string;
     ordersPlaced: number;
     goatsPurchased: number;
   }>;
@@ -334,6 +368,16 @@ const getCurrentMonthDates = () => {
   return { startDate: formatDateToLocal(startOfMonth), endDate: formatDateToLocal(endOfMonth) };
 };
 
+const getRollingSalesChartDates = () => {
+  const now = new Date();
+  const startOfWindow = new Date(now.getFullYear(), now.getMonth() - 18, 1);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+  return {
+    startDate: formatDateToLocal(startOfWindow),
+    endDate: formatDateToLocal(endOfMonth),
+  };
+};
+
 const getCurrentYearDates = () => {
   const now = new Date();
   return {
@@ -349,6 +393,19 @@ const getQDates = (year: number, quarter: 1 | 2 | 3 | 4) => {
   return {
     startDate: start,
     endDate: `${year}-${String(endMonth).padStart(2, "0")}-${endDay}`,
+  };
+};
+
+const mergeBoundedDateRanges = (
+  primaryRange: { startDate: string; endDate: string },
+  fallbackRange: { startDate: string; endDate: string },
+) => {
+  const startDates = [primaryRange.startDate, fallbackRange.startDate].filter(Boolean);
+  const endDates = [primaryRange.endDate, fallbackRange.endDate].filter(Boolean);
+
+  return {
+    startDate: startDates.length > 0 ? startDates.sort()[0] : fallbackRange.startDate,
+    endDate: endDates.length > 0 ? endDates.sort()[endDates.length - 1] : fallbackRange.endDate,
   };
 };
 
@@ -632,8 +689,10 @@ const createEmptySalesAnalytics = (salesInputs: SalesInputs): SalesAnalyticsPayl
   },
   genderData: [],
   countyData: [],
+  countyGenderData: [],
   topLocations: [],
   topFarmers: [],
+  recentOfftakes: [],
   monthlyTrend: [],
   monthlyTrendSeries: [],
   orderPurchaseComparison: [],
@@ -723,13 +782,16 @@ const buildLocalSalesAnalytics = (
   selectedProgramme: string | null,
   salesInputs: SalesInputs,
   topMonthsRecords: OfftakeData[] = records,
+  selectedCounty = ALL_COUNTIES_OPTION,
 ): SalesAnalyticsPayload => {
   const targetProgramme = getAnalyticsProgrammeToken(selectedProgramme);
 
   const filteredData = records.filter((record) => {
     const recordProgramme = getAnalyticsProgrammeToken(record.programme);
     const matchesProgramme = !targetProgramme || recordProgramme === targetProgramme;
-    return matchesProgramme && isDateInRange(record.date, dateRange.startDate, dateRange.endDate);
+    return matchesProgramme &&
+      matchesCountySelection(record.county, selectedCounty) &&
+      isDateInRange(record.date, dateRange.startDate, dateRange.endDate);
   });
 
   // Accumulators
@@ -750,6 +812,7 @@ const buildLocalSalesAnalytics = (
 
   const genderCounts: Record<string, number> = { Male: 0, Female: 0 };
   const countySales: Record<string, number> = {};
+  const countyGenderCounts: Record<string, { Male: number; Female: number }> = {};
   const locationSales: Record<string, number> = {};
   const farmerSales: Record<string, {
     name: string;
@@ -785,23 +848,29 @@ const buildLocalSalesAnalytics = (
     animalsPurchased: number;
     purchaseCost: number;
   }> = {};
+  const recentOfftakesList: RecentOfftakeItem[] = [];
 
   // Pre-filter orders & requisitions
   const filteredOrders = orders.filter((record) => {
     const recordProgramme = getAnalyticsProgrammeToken(record.programme);
     const matchesProgramme = !targetProgramme || recordProgramme === targetProgramme;
-    return matchesProgramme && isDateInRange(getOrderRecordDate(record), dateRange.startDate, dateRange.endDate);
+    return matchesProgramme &&
+      matchesCountySelection((record as any).county ?? (record as any).County, selectedCounty) &&
+      isDateInRange(getOrderRecordDate(record), dateRange.startDate, dateRange.endDate);
   });
 
   const filteredRequisitions = requisitions.filter((record) => {
     const recordProgramme = getAnalyticsProgrammeToken(record.programme);
     const matchesProgramme = !targetProgramme || recordProgramme === targetProgramme;
-    return matchesProgramme && isDateInRange(getRequisitionRecordDate(record), dateRange.startDate, dateRange.endDate);
+    return matchesProgramme &&
+      matchesCountySelection((record as any).county ?? (record as any).County, selectedCounty) &&
+      isDateInRange(getRequisitionRecordDate(record), dateRange.startDate, dateRange.endDate);
   });
 
   const topMonthsData = topMonthsRecords.filter((record) => {
     const recordProgramme = getAnalyticsProgrammeToken(record.programme);
-    return !targetProgramme || recordProgramme === targetProgramme;
+    return (!targetProgramme || recordProgramme === targetProgramme) &&
+      matchesCountySelection(record.county, selectedCounty);
   });
 
   // ---- Process offtake records ----
@@ -840,11 +909,12 @@ const buildLocalSalesAnalytics = (
     totalRevenue += txCarcassWeight * salesInputs.pricePerKg;
 
     // Gender
+    let normalizedGender = "";
     if (record.gender) {
-      const gender =
+      normalizedGender =
         record.gender.charAt(0).toUpperCase() +
         record.gender.slice(1).toLowerCase();
-      if (gender in genderCounts) genderCounts[gender] += 1;
+      if (normalizedGender in genderCounts) genderCounts[normalizedGender] += 1;
     }
 
     // County, location, farmer
@@ -857,6 +927,11 @@ const buildLocalSalesAnalytics = (
 
     countySales[county] = (countySales[county] || 0) + txGoats;
     locationSales[location] = (locationSales[location] || 0) + txAnimals;
+
+    if (normalizedGender === "Male" || normalizedGender === "Female") {
+      if (!countyGenderCounts[county]) countyGenderCounts[county] = { Male: 0, Female: 0 };
+      countyGenderCounts[county][normalizedGender] += 1;
+    }
 
     if (!farmerSales[beneficiaryKey]) {
       farmerSales[beneficiaryKey] = {
@@ -895,6 +970,22 @@ const buildLocalSalesAnalytics = (
       monthlyData[monthKey].volume += txAnimals;
       monthlyData[monthKey].animalsPurchased += txAnimals;
       monthlyData[monthKey].purchaseCost += txCost;
+
+      // Recent offtakes – individual record entry, most recent first
+      recentOfftakesList.push({
+        id: record.id,
+        name: farmerName,
+        county,
+        location,
+        animals: txAnimals,
+        purchaseCost: txCost,
+        dateLabel: date.toLocaleDateString("en-GB", {
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+        }),
+        sortTime: date.getTime(),
+      });
     }
   }
 
@@ -992,15 +1083,38 @@ const buildLocalSalesAnalytics = (
   const { data: requisitionTrend, series: requisitionTrendSeries } = buildTrendSeries(requisitionTrendValues);
   const includesMultipleTopMonthYears =
     new Set(Object.values(topMonthsMonthlyData).map((entry) => entry.year)).size > 1;
-  const includesMultipleOrderYears =
-    new Set(Object.values(orderMonthlyData).map((entry) => entry.year)).size > 1;
-  const orderPurchaseComparison = Object.entries(orderMonthlyData)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([, entry]) => ({
-      month: includesMultipleOrderYears ? `${entry.monthName} ${entry.year}` : entry.monthName,
-      ordersPlaced: entry.ordersPlaced,
-      goatsPurchased: entry.goatsPurchased,
-    }));
+  const firstPurchasedMonthKey = Object.entries(monthlyData)
+    .filter(([, entry]) => entry.animalsPurchased > 0)
+    .map(([monthKey]) => monthKey)
+    .sort((left, right) => left.localeCompare(right))[0];
+  const orderPurchaseMonthKeys = Array.from(
+    new Set([...Object.keys(monthlyData), ...Object.keys(orderMonthlyData)]),
+  )
+    .filter((monthKey) => !firstPurchasedMonthKey || monthKey >= firstPurchasedMonthKey)
+    .sort((left, right) => left.localeCompare(right));
+  const orderPurchaseComparison = orderPurchaseMonthKeys.map((monthKey) => {
+    const purchaseEntry = monthlyData[monthKey];
+    const orderEntry = orderMonthlyData[monthKey];
+    const [year, monthToken] = monthKey.split("-");
+    const monthIndex = Number(monthToken) - 1;
+    const monthName = ALL_MONTHS[monthIndex] ?? monthToken;
+
+    return {
+      month: `${monthName} ${year}`,
+      county: selectedCounty === ALL_COUNTIES_OPTION ? "All counties" : selectedCounty,
+      ordersPlaced: orderEntry?.ordersPlaced ?? 0,
+      goatsPurchased: purchaseEntry?.animalsPurchased ?? orderEntry?.goatsPurchased ?? 0,
+    };
+  });
+
+  const countyGenderData: CountyGenderPoint[] = Object.entries(countyGenderCounts)
+    .map(([name, counts]) => ({ name, Male: counts.Male, Female: counts.Female }))
+    .sort((a, b) => (b.Male + b.Female) - (a.Male + a.Female))
+    .slice(0, 10);
+
+  const recentOfftakes = recentOfftakesList
+    .sort((a, b) => b.sortTime - a.sortTime)
+    .slice(0, RECENT_OFFTAKES_LIMIT);
 
   return {
     filteredCount: filteredData.length,
@@ -1034,6 +1148,7 @@ const buildLocalSalesAnalytics = (
     countyData: Object.entries(countySales)
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count),
+    countyGenderData,
     topLocations: Object.entries(locationSales)
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count)
@@ -1044,6 +1159,7 @@ const buildLocalSalesAnalytics = (
           (b.animals - a.animals) || (b.purchaseCost - a.purchaseCost),
       )
       .slice(0, 5),
+    recentOfftakes,
     monthlyTrend,
     monthlyTrendSeries,
     orderPurchaseComparison,
@@ -1055,7 +1171,7 @@ const buildLocalSalesAnalytics = (
           (b.animalsPurchased - a.animalsPurchased) ||
           (b.purchaseCost - a.purchaseCost),
       )
-      .slice(0, 3)
+      .slice(0, 5)
       .map((entry) => ({
         month: includesMultipleTopMonthYears
           ? `${entry.monthName} ${entry.year}`
@@ -1078,6 +1194,7 @@ const useOfftakeData = (
   dateRange: { startDate: string; endDate: string },
   selectedProgramme: string | null,
   salesInputs: SalesInputs,
+  selectedCounty: string,
 ) => {
   const localData = useMemo(
     () =>
@@ -1089,6 +1206,7 @@ const useOfftakeData = (
         selectedProgramme,
         salesInputs,
         topMonthsOfftakeData,
+        selectedCounty,
       ),
     [
       offtakeData,
@@ -1100,6 +1218,7 @@ const useOfftakeData = (
       salesInputs.pricePerKg,
       salesInputs.expenses,
       selectedProgramme,
+      selectedCounty,
     ],
   );
 
@@ -1112,6 +1231,7 @@ const useOfftakeData = (
       dateRange.endDate,
       salesInputs.pricePerKg,
       salesInputs.expenses,
+      selectedCounty,
     ],
     queryFn: () =>
       fetchAnalysisSummary({
@@ -1148,6 +1268,7 @@ interface StatsCardProps {
   subText?: string;
   subLines?: string[];
   color?: "blue" | "orange" | "yellow" | "green" | "red" | "purple" | "teal";
+  valueClassName?: string;
 }
 
 const STATS_COLOR_MAP: Record<
@@ -1170,6 +1291,7 @@ const StatsCard = memo(function StatsCard({
   subText,
   subLines = [],
   color = "blue",
+  valueClassName = "text-xl",
 }: StatsCardProps) {
   const theme = STATS_COLOR_MAP[color];
   const detailLines = [subText, ...subLines].filter(
@@ -1177,30 +1299,30 @@ const StatsCard = memo(function StatsCard({
   );
 
   return (
-    <Card className="group relative hover:shadow-lg transition-all duration-300 border border-slate-100 shadow-sm bg-gradient-to-br from-white to-gray-50/50 rounded-2xl overflow-hidden">
-      <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${theme.border} transition-all group-hover:w-2`} />
+    <Card className="group relative overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-all duration-200 hover:border-slate-300 hover:shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
+      <div className={`absolute left-0 top-0 bottom-0 w-1 ${theme.border} transition-all group-hover:w-1.5`} />
 
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3 pt-5 pl-6 pr-4">
-        <CardTitle className="text-xs font-semibold text-gray-500 uppercase tracking-wider">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2 pt-4 pl-5 pr-4">
+        <CardTitle className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
           {title}
         </CardTitle>
         <div
-          className={`p-2.5 rounded-xl ${theme.bg} shadow-sm group-hover:scale-105 transition-transform`}
+          className={`rounded-lg p-2 ${theme.bg} transition-transform group-hover:scale-105`}
         >
-          <Icon className={`h-5 w-5 ${theme.text}`} />
+          <Icon className={`h-4 w-4 ${theme.text}`} />
         </div>
       </CardHeader>
 
-      <CardContent className="pl-6 pb-5 pr-4">
-        <div className="text-3xl font-bold text-gray-900 tracking-tight">
+      <CardContent className="pl-5 pb-4 pr-4">
+        <div className={`${valueClassName} font-semibold tracking-tight text-slate-900`}>
           {value}
         </div>
         {detailLines.length > 0 && (
-          <div className="mt-2 space-y-1">
+          <div className="mt-1.5 space-y-0.5">
             {detailLines.map((line, index) => (
               <p
                 key={`${title}-${index}`}
-                className="text-xs text-gray-500 font-medium leading-relaxed"
+                className="text-[11px] font-medium leading-snug text-slate-500"
               >
                 {line}
               </p>
@@ -1236,14 +1358,14 @@ const HEADER_TINTS: Record<string, { bg: string; text: string }> = {
 const SectionCardHeader = ({ icon: Icon, title, subtitle, tint = "blue" }: SectionCardHeaderProps) => {
   const theme = HEADER_TINTS[tint];
   return (
-    <CardHeader className="pb-3 pt-6 px-6">
-      <div className="flex items-center gap-3">
-        <div className={`p-2.5 rounded-xl ${theme.bg} shadow-sm shrink-0`}>
-          <Icon className={`h-4 w-4 ${theme.text}`} />
+    <CardHeader className="px-5 pb-2 pt-5">
+      <div className="flex items-center gap-2.5">
+        <div className={`shrink-0 rounded-lg p-2 ${theme.bg}`}>
+          <Icon className={`h-3.5 w-3.5 ${theme.text}`} />
         </div>
         <div className="min-w-0">
-          <CardTitle className="text-sm font-bold text-gray-800">{title}</CardTitle>
-          {subtitle && <p className="text-xs text-slate-500 mt-0.5">{subtitle}</p>}
+          <CardTitle className="text-[13px] font-semibold text-slate-800">{title}</CardTitle>
+          {subtitle && <p className="mt-0.5 text-[11px] leading-snug text-slate-500">{subtitle}</p>}
         </div>
       </div>
     </CardHeader>
@@ -1280,14 +1402,14 @@ const DoughnutBreakdown = memo(function DoughnutBreakdown({
 
   if (data.length === 0) {
     return (
-      <div className="flex h-[300px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+      <div className="flex h-[240px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
         {emptyMessage}
       </div>
     );
   }
 
   return (
-    <div className="relative mx-auto h-[300px] w-full max-w-[340px]">
+    <div className="relative mx-auto h-[240px] w-full max-w-[300px]">
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Pie
@@ -1296,10 +1418,9 @@ const DoughnutBreakdown = memo(function DoughnutBreakdown({
             nameKey="name"
             cx="50%"
             cy="50%"
-            innerRadius={78}
-            outerRadius={116}
+            innerRadius={62}
+            outerRadius={94}
             paddingAngle={4}
-            cornerRadius={8}
           >
             {data.map((entry) => (
               <Cell key={entry.name} fill={entry.fill} />
@@ -1315,10 +1436,10 @@ const DoughnutBreakdown = memo(function DoughnutBreakdown({
         </PieChart>
       </ResponsiveContainer>
       <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center pb-7">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
           {totalLabel}
         </span>
-        <span className="text-2xl font-black text-slate-900">{fmt(total)}</span>
+        <span className="text-xl font-semibold text-slate-900">{fmt(total)}</span>
       </div>
     </div>
   );
@@ -1328,6 +1449,97 @@ const TOOLTIP_STYLE: React.CSSProperties = {
   borderRadius: "8px",
   border: "none",
   boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
+};
+
+const RequisitionTrendColumnChart = ({
+  data,
+  series,
+}: {
+  data: TrendPoint[];
+  series: TrendSeriesMeta[];
+}) => {
+  const { categories, counts } = useMemo(() => {
+    const cats: string[] = [];
+    const vals: number[] = [];
+
+    data.forEach((entry) => {
+      cats.push(String(entry.month || "Unknown"));
+
+      if (series.length === 0) {
+        vals.push(Number(entry.count || 0));
+        return;
+      }
+
+      vals.push(
+        series.reduce((total, item) => total + Number(entry[item.key] || 0), 0),
+      );
+    });
+
+    return { categories: cats, counts: vals };
+  }, [data, series]);
+
+  if (data.length === 0) {
+    return (
+      <div className="flex h-[280px] items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
+        No requisition trend data found for the selected filters.
+      </div>
+    );
+  }
+
+  const options: ApexCharts.ApexOptions = {
+    chart: {
+      height: 280,
+      background: "transparent",
+      toolbar: { show: false },
+      fontFamily: "inherit",
+      zoom: { enabled: false },
+      selection: { enabled: false },
+    },
+    plotOptions: {
+      bar: {
+        columnWidth: "80%",
+        borderRadius: 0,
+        borderRadiusApplication: "end",
+      },
+    },
+    colors: ["#22d3ee"],
+    xaxis: {
+      categories,
+      labels: { show: false },
+      axisBorder: { show: false },
+      axisTicks: { show: false },
+    },
+    yaxis: {
+      title: { text: "Requisitions", style: { fontSize: "11px", color: "#64748b" } },
+      labels: { style: { fontSize: "11px" } },
+    },
+    grid: { borderColor: "#f1f5f9", strokeDashArray: 4 },
+    dataLabels: { enabled: false },
+    tooltip: {
+      shared: false,
+      intersect: true,
+      custom: ({ dataPointIndex }: { dataPointIndex: number }) => {
+        const month = categories[dataPointIndex] || "Unknown";
+        const requisitions = counts[dataPointIndex] || 0;
+        return `
+          <div style="padding:8px 12px;font-size:12px;line-height:1.5;">
+            <div style="font-weight:600;color:#0f172a;">${month}</div>
+            <div style="color:#0f172a;">Requisitions: <strong>${Number(requisitions).toLocaleString()}</strong></div>
+          </div>
+        `;
+      },
+    },
+    legend: { show: false },
+  };
+
+  return (
+    <Chart
+      options={options}
+      series={[{ name: "Requisitions", data: counts }]}
+      type="bar"
+      height={280}
+    />
+  );
 };
 
 // ---------------------------------------------------------------------------
@@ -1419,11 +1631,13 @@ const SalesReport = () => {
 
   const currentYear = new Date().getFullYear();
   const currentMonthDates = useMemo(() => getCurrentMonthDates(), []);
+  const rollingSalesChartDates = useMemo(() => getRollingSalesChartDates(), []);
   const [selectedYear, setSelectedYear] = useState<string>(ALL_YEARS_OPTION);
   const [timeFrame, setTimeFrame] = useState<"weekly" | "monthly" | "yearly">(
     "monthly",
   );
   const [dateRange, setDateRange] = useState(currentMonthDates);
+  const [selectedCounty, setSelectedCounty] = useState<string>(ALL_COUNTIES_OPTION);
 
   const [salesInputs, setSalesInputs] = useState<SalesInputs>({
     pricePerKg: 0,
@@ -1511,6 +1725,15 @@ const SalesReport = () => {
   }, [accessibleProgrammes.length, setActiveProgram]);
   const selectedProgramme = activeProgram || null;
   const analysisProgramme = activeProgram || null;
+  const countyOptions = useMemo(() => {
+    const counties = new Map<string, string>();
+    offtakeData.forEach((record) => {
+      const county = String(record.county || "").trim();
+      const key = normalizeCountyFilterValue(county);
+      if (key && !counties.has(key)) counties.set(key, county);
+    });
+    return Array.from(counties.values()).sort((left, right) => left.localeCompare(right));
+  }, [offtakeData]);
 
   const hasConfiguredPriceConfig =
     priceConfig.pricePerKg > 0 || priceConfig.expenses > 0 || priceConfig.carcassRatio > 0;
@@ -1524,11 +1747,8 @@ const SalesReport = () => {
   const deferredSalesInputs = useDeferredValue(salesInputs);
   const isComputing = deferredDateRange !== dateRange || deferredSalesInputs !== salesInputs;
   const effectiveFetchRange = useMemo(
-    () =>
-      dateRange.startDate && dateRange.endDate
-        ? dateRange
-        : currentMonthDates,
-    [currentMonthDates, dateRange],
+    () => mergeBoundedDateRanges(dateRange, rollingSalesChartDates),
+    [dateRange, rollingSalesChartDates],
   );
   const salesFetchOptions = useMemo(
     () => ({
@@ -1549,8 +1769,8 @@ const SalesReport = () => {
     };
   }, []);
   const salesDataCacheKey = useMemo(
-    () => `${activeProgram}:${dateRange.startDate || "all"}:${dateRange.endDate || "all"}`,
-    [activeProgram, dateRange.endDate, dateRange.startDate],
+    () => `${activeProgram}:${effectiveFetchRange.startDate}:${effectiveFetchRange.endDate}`,
+    [activeProgram, effectiveFetchRange.endDate, effectiveFetchRange.startDate],
   );
   const topMonthsDataCacheKey = useMemo(
     () => `${activeProgram}:top-months:${currentYear}`,
@@ -1560,9 +1780,9 @@ const SalesReport = () => {
   const {
     stats,
     genderData,
-    countyData,
-    topLocations,
+    countyGenderData,
     topFarmers,
+    recentOfftakes,
     monthlyTrend = [],
     monthlyTrendSeries = [],
     orderPurchaseComparison = [],
@@ -1580,6 +1800,20 @@ const SalesReport = () => {
     deferredDateRange,
     analysisProgramme,
     deferredSalesInputs,
+    selectedCounty,
+  );
+
+  const {
+    orderPurchaseComparison: rollingOrderPurchaseComparison = [],
+  } = useOfftakeData(
+    offtakeData,
+    topMonthsOfftakeData,
+    orderData,
+    requisitionData,
+    rollingSalesChartDates,
+    analysisProgramme,
+    deferredSalesInputs,
+    selectedCounty,
   );
 
   // Gender doughnut – keeps the navy blue / orange palette.
@@ -2053,6 +2287,7 @@ const SalesReport = () => {
 
   const clearFilters = useCallback(() => {
     setSelectedYear(ALL_YEARS_OPTION);
+    setSelectedCounty(ALL_COUNTIES_OPTION);
     setDateRange({ startDate: "", endDate: "" });
     setTimeFrame("yearly");
     setPendingDateKey(null);
@@ -2184,10 +2419,20 @@ const SalesReport = () => {
     stats.totalAnimals > 0
       ? ((stats.totalSheep / stats.totalAnimals) * 100).toFixed(1)
       : "0";
+  const orderFulfillmentPct =
+    stats.totalGoatOrdersPlaced > 0
+      ? Math.min(100, (stats.totalGoatsPurchasedFromOrders / stats.totalGoatOrdersPlaced) * 100)
+      : 0;
+  const requisitionCompletionPct =
+    stats.totalRequisitions > 0
+      ? Math.min(100, (stats.completedRequisitions / stats.totalRequisitions) * 100)
+      : 0;
+  const purchaseCostSharePct =
+    stats.totalRevenue > 0
+      ? Math.min(100, (stats.totalPurchaseCost / stats.totalRevenue) * 100)
+      : 0;
   const hasLegacyPurchaseTrend = monthlyTrendSeries.length === 0;
-  const hasLegacyRequisitionTrend = requisitionTrendSeries.length === 0;
   const hasMultiplePurchaseYears = monthlyTrendSeries.length > 1;
-  const hasMultipleRequisitionYears = requisitionTrendSeries.length > 1;
 
   // ---------------------------------------------------------------------------
   // Report summary – every headline metric shown in FULL (never millified),
@@ -2253,30 +2498,30 @@ const SalesReport = () => {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="min-h-screen bg-slate-50/80 p-2 md:p-4 lg:p-6">
-      <div className="max-w-7xl mx-auto space-y-8">
+    <div className="min-h-screen bg-slate-50 p-2.5 md:p-4 lg:p-5">
+      <div className="mx-auto max-w-7xl space-y-6">
         {/* ---------------------------------------------------------------- */}
         {/* Header Section                                                    */}
         {/* ---------------------------------------------------------------- */}
-        <div className="flex flex-col gap-4 md:gap-6">
-          <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+        <div className="flex flex-col gap-3 md:gap-4">
+          <div className="flex flex-col justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-[0_1px_2px_rgba(15,23,42,0.04)] md:flex-row md:items-center">
             <div>
-              <h1 className="text-md md:text-xl font-bold text-gray-900 tracking-tight">
+              <h1 className="text-base font-semibold tracking-tight text-slate-900 md:text-lg">
                 Sales Metrics Dashboard
               </h1>
-              <p className="text-sm text-gray-500 mt-1 flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-blue-600" />
+              <p className="mt-1 flex items-center gap-2 text-xs text-slate-500">
+                <span className="h-1.5 w-1.5 rounded-full bg-blue-600" />
                 Viewing Data:{" "}
-                <span className="font-semibold text-blue-700">
+                <span className="font-medium text-blue-700">
                   {activeProgram || "All Programmes"}
                 </span>
                 {isCacheHit && (
-                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full border border-blue-200">
+                  <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[10px] text-blue-700">
                     Cached
                   </span>
                 )}
                 {isComputing && (
-                  <span className="text-xs bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full border border-amber-200 animate-pulse">
+                  <span className="animate-pulse rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700">
                     Computing...
                   </span>
                 )}
@@ -2287,10 +2532,10 @@ const SalesReport = () => {
               <Button
                 type="button"
                 variant="outline"
-                className="w-full md:w-auto"
+                className="h-8 w-full border-green-600 bg-green-600 text-xs text-white hover:bg-green-700 hover:text-white md:w-auto"
                 onClick={openSalesInputsDialog}
               >
-                <Calculator className="h-4 w-4 mr-2" />
+                <Calculator className="mr-2 h-3.5 w-3.5" />
                 {hasConfiguredPriceConfig
                   ? "Update Prices"
                   : "Add Prices"}
@@ -2301,8 +2546,8 @@ const SalesReport = () => {
           {/* -------------------------------------------------------------- */}
           {/* Filter Strip                                                    */}
           {/* -------------------------------------------------------------- */}
-          <Card className="w-full border-0 bg-white shadow-lg">
-            <CardContent className="px-3 py-3">
+          <Card className="w-full rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+            <CardContent className="px-3 py-2.5">
               <div className="flex items-center gap-2">
                 {/* Left scroll arrow (mobile only) */}
                 <Button
@@ -2316,20 +2561,20 @@ const SalesReport = () => {
                   <span className="sr-only">Scroll filters left</span>
                 </Button>
 
-                <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <div className="min-w-0 flex-1 overflow-hidden">
                   <div
                     ref={filterStripRef}
                     className="w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
                   >
-                    <div className="flex min-w-max flex-nowrap items-center gap-2 p-1">
+                    <div className="flex w-full flex-nowrap items-center justify-between gap-2 p-1">
                       {/* Year selector */}
                       <Select
                         value={selectedYear}
                         onValueChange={handleYearChange}
                       >
-                        <SelectTrigger className="h-9 w-[150px] shrink-0 border-gray-200 text-sm">
+                        <SelectTrigger className="h-8 w-[145px] shrink-0 border-slate-200 text-xs">
                           <div className="flex items-center gap-2">
-                            <Calendar className="h-4 w-4 text-gray-500" />
+                            <Calendar className="h-3.5 w-3.5 text-slate-500" />
                             <SelectValue placeholder="Year" />
                           </div>
                         </SelectTrigger>
@@ -2351,7 +2596,7 @@ const SalesReport = () => {
                           value={activeProgram}
                           onValueChange={handleProgramChange}
                         >
-                          <SelectTrigger className="h-9 w-[150px] shrink-0 border-gray-200 text-sm">
+                          <SelectTrigger className="h-8 w-[145px] shrink-0 border-slate-200 text-xs">
                             <SelectValue placeholder="Select" />
                           </SelectTrigger>
                           <SelectContent>
@@ -2367,6 +2612,20 @@ const SalesReport = () => {
                         </Select>
                       )}
 
+                      <Select value={selectedCounty} onValueChange={setSelectedCounty}>
+                        <SelectTrigger className="h-8 w-[145px] shrink-0 border-slate-200 text-xs">
+                          <SelectValue placeholder="County" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={ALL_COUNTIES_OPTION}>All Counties</SelectItem>
+                          {countyOptions.map((county) => (
+                            <SelectItem key={county} value={county}>
+                              {county}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+
                       {/* Date inputs */}
                       <div className="relative">
                         <Input
@@ -2378,7 +2637,7 @@ const SalesReport = () => {
                           }
                           onFocus={() => handleDateInputFocus("startDate")}
                           onBlur={handleDateInputBlur}
-                          className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
+                          className="h-8 w-[145px] shrink-0 border-slate-200 pr-2 text-xs focus:border-blue-500"
                         />
                         {isComputing && pendingDateKey === "startDate" && (
                           <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded">
@@ -2396,7 +2655,7 @@ const SalesReport = () => {
                           }
                           onFocus={() => handleDateInputFocus("endDate")}
                           onBlur={handleDateInputBlur}
-                          className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
+                          className="h-8 w-[145px] shrink-0 border-slate-200 pr-2 text-xs focus:border-blue-500"
                         />
                         {isComputing && pendingDateKey === "endDate" && (
                           <div className="absolute inset-0 flex items-center justify-center bg-white/60 rounded">
@@ -2410,7 +2669,7 @@ const SalesReport = () => {
                         variant="outline"
                         onClick={setMonthFilter}
                         size="sm"
-                        className="h-9 shrink-0 text-xs"
+                        className="h-8 shrink-0 text-xs"
                       >
                         This Month
                       </Button>
@@ -2421,7 +2680,7 @@ const SalesReport = () => {
                           <Button
                             variant="outline"
                             size="sm"
-                            className="h-9 shrink-0 text-xs gap-1"
+                            className="h-8 shrink-0 gap-1 text-xs"
                           >
                             Quarters <ChevronDown className="h-3 w-3" />
                           </Button>
@@ -2448,7 +2707,7 @@ const SalesReport = () => {
                         onClick={clearFilters}
                         variant="ghost"
                         size="sm"
-                        className="h-9 shrink-0 text-red-500 hover:text-red-600"
+                        className="h-8 shrink-0 text-xs text-red-500 hover:text-red-600"
                       >
                         Reset
                       </Button>
@@ -2472,7 +2731,7 @@ const SalesReport = () => {
           </Card>
 
           {filteredCount === 0 && (
-            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800">
               No offtake records matched the current programme and date range.
               Try changing the programme or widening the dates.
             </div>
@@ -2482,48 +2741,54 @@ const SalesReport = () => {
         {/* ================================================================= */}
         {/* SECTION 1: PURCHASES                                              */}
         {/* ================================================================= */}
-        <section className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-500">
           <div className="flex items-center gap-2 pb-1 border-b border-gray-200">
-            <Beef className="h-5 w-5 text-blue-600" />
-            <h2 className="text-lg font-bold text-gray-800">
+            <Beef className="h-4 w-4 text-blue-600" />
+            <h2 className="text-sm font-semibold text-slate-800">
               Purchases Overview
             </h2>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-3">
             <StatsCard
-              title="Total Animals Purchased"
+              title="Animals Purchased"
               value={millify(stats.totalAnimals)}
               icon={Package}
               subText={`Goats: ${stats.totalGoats} (${goatPct}%)  Sheep: ${stats.totalSheep} (${sheepPct}%)`}
               color="blue"
+              valueClassName="text-lg"
             />
             <StatsCard
-              title="Total Purchase Cost"
+              title="Purchase Cost"
               value={millify(stats.totalPurchaseCost)}
               icon={DollarSign}
               subText={`Cost/Goat: ${formatCurrency(stats.costPerGoat)}  Avg/Kg: ${formatCurrency(stats.avgCostPerKgCarcass)}`}
               color="green"
+              valueClassName="text-lg"
             />
             <StatsCard
-              title="Total Live Weight"
-              value={`${millify(stats.totalLiveWeight)} kgs`}
+              title="Live Weight"
+              value={`${formatNumber(stats.totalLiveWeight)} Kgs`}
               icon={TrendingUp}
-              subText={`Avg: ${stats.avgLiveWeight.toFixed(1)} kg`}
+              subText={``}
+              subLines={[
+                `Avg live: ${stats.avgLiveWeight.toFixed(1)} Kgs | Carcass: ${formatNumber(stats.totalCarcassWeight)} Kgs | Avg carcass: ${stats.avgCarcassWeight.toFixed(1)} kg`,
+              ]}
               color="purple"
+              valueClassName="text-lg"
             />
           </div>
 
-          <div className="grid gap-6 md:grid-cols-2">
+          <div className="grid gap-4 md:grid-cols-2">
             {/* Doughnut – Gender (navy blue / orange) */}
-            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+            <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
                 icon={Users}
                 title="Farmers Participating In Offtake"
                 subtitle="Gender breakdown of beneficiaries for the selected period"
                 tint="blue"
               />
-              <CardContent className="px-4 pb-6 sm:px-6">
+              <CardContent className="px-4 pb-4 sm:px-5">
                 <DoughnutBreakdown
                   data={genderDoughnutData}
                   total={genderDoughnutTotal}
@@ -2534,25 +2799,25 @@ const SalesReport = () => {
               </CardContent>
             </Card>
 
-            {/* Top 3 Months */}
-            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl flex flex-col">
+            {/* Top 5 Months */}
+            <Card className="flex flex-col rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
                 icon={Zap}
                 title="Top Performing Months"
                 subtitle="Highest volume months by animals purchased"
                 tint="yellow"
               />
-              <CardContent className="flex-1 px-6 pb-6 flex flex-col justify-center">
+              <CardContent className="flex flex-1 flex-col justify-center px-5 pb-5">
                 {top3Months.length > 0 ? (
-                  <div className="space-y-4">
+                  <div className="space-y-2.5">
                     {top3Months.map((m, index) => (
                       <div
                         key={index}
-                        className="flex items-center justify-between p-3 rounded-xl bg-gradient-to-r from-yellow-50/50 to-white border border-yellow-100 hover:shadow-md transition-all"
+                        className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/60 p-2.5 transition-all hover:border-yellow-100 hover:bg-yellow-50/40"
                       >
                         <div className="flex items-center gap-3">
                           <div
-                            className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm shadow-sm ${
+                            className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${
                               index === 0
                                 ? "bg-yellow-400 text-white"
                                 : index === 1
@@ -2563,7 +2828,7 @@ const SalesReport = () => {
                             {index + 1}
                           </div>
                           <div>
-                            <p className="text-sm font-bold text-gray-800">
+                            <p className="text-xs font-semibold text-slate-800">
                               {m.month}
                             </p>
                             <p className="text-[11px] text-gray-500">
@@ -2573,7 +2838,7 @@ const SalesReport = () => {
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-sm font-bold text-green-700">
+                          <p className="text-xs font-semibold text-green-700">
                             {formatCurrency(m.purchaseCost ?? 0)}
                           </p>
                           <p className="text-[11px] text-gray-500">
@@ -2584,7 +2849,7 @@ const SalesReport = () => {
                     ))}
                   </div>
                 ) : (
-                  <div className="text-center text-gray-400 py-8 text-sm">
+                  <div className="py-8 text-center text-xs text-slate-400">
                     No performance data available for selected range
                   </div>
                 )}
@@ -2592,104 +2857,91 @@ const SalesReport = () => {
             </Card>
           </div>
 
-          <div className="grid gap-6 md:grid-cols-2">
-            {/* Curved Area Chart – Goats Per County */}
-            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+          <div className="grid gap-4 md:grid-cols-2">
+            {/* Ordered vs purchased trend */}
+            <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
-                icon={MapPin}
-                title="Goats Purchased Per County"
-                subtitle="Distribution of goat purchases across counties"
+                icon={TrendingUp}
+                title="Animals Purchased (County)"
+                subtitle="Rolling monthly comparison of ordered animals and purchases"
                 tint="teal"
               />
-              <CardContent className="px-6 pb-6">
-                <div className="h-[300px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart
-                      data={countyData}
-                      margin={{ top: 5, right: 20, left: 20, bottom: 5 }}
-                    >
-                      <defs>
-                        <linearGradient id="countyGradient" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor={COLORS.teal} stopOpacity={0.3} />
-                          <stop offset="95%" stopColor={COLORS.teal} stopOpacity={0.02} />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid
-                        strokeDasharray="3 3"
-                        stroke="#f1f5f9"
-                        vertical={false}
-                      />
-                      <XAxis
-                        dataKey="name"
-                        tick={{ fontSize: 11, fill: "#64748b" }}
-                        interval={0}
-                        angle={-25}
-                        textAnchor="end"
-                        height={60}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <YAxis
-                        tick={{ fontSize: 11, fill: "#334155" }}
-                        allowDecimals={false}
-                        axisLine={false}
-                        tickLine={false}
-                      />
-                      <Tooltip
-                        cursor={{ stroke: "#e2e8f0", strokeWidth: 1 }}
-                        contentStyle={TOOLTIP_STYLE}
-                        formatter={(value: number) => [
-                          `${value} goats`,
-                          "Goats",
-                        ]}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="count"
-                        stroke={COLORS.teal}
-                        strokeWidth={2.5}
-                        fill="url(#countyGradient)"
-                        dot={{
-                          r: 5,
-                          fill: COLORS.teal,
-                          strokeWidth: 2,
-                          stroke: "#fff",
-                        }}
-                        activeDot={{
-                          r: 7,
-                          fill: COLORS.darkBlue,
-                          strokeWidth: 2,
-                          stroke: "#fff",
-                        }}
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
+              <CardContent className="px-5 pb-5">
+                {rollingOrderPurchaseComparison.length > 0 ? (
+                  <div className="h-[270px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart
+                        data={rollingOrderPurchaseComparison}
+                        margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" />
+                        <XAxis
+                          dataKey="month"
+                          tick={{ fontSize: 10, fill: "#64748b" }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 10, fill: "#334155" }}
+                          allowDecimals={false}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip
+                          cursor={{ stroke: "#e2e8f0", strokeWidth: 1 }}
+                          contentStyle={TOOLTIP_STYLE}
+                          labelFormatter={(label, payload) => {
+                            const county = payload?.[0]?.payload?.county;
+                            return county ? `${label} - ${county}` : label;
+                          }}
+                          formatter={(value: number | string, name: string) => [
+                            `${formatNumber(Number(value))} animals`,
+                            name,
+                          ]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                        <Line
+                          type="monotone"
+                          dataKey="goatsPurchased"
+                          name="Purchased"
+                          stroke={COLORS.yellow}
+                          strokeWidth={2}
+                          dot={{ r: 4, fill: COLORS.yellow, strokeWidth: 2, stroke: "#fff" }}
+                          activeDot={{ r: 6 }}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div className="flex h-[270px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
+                    No ordered or purchased animal trend data available
+                  </div>
+                )}
               </CardContent>
             </Card>
 
             {/* Top Farmers */}
-            <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl flex flex-col">
+            <Card className="flex flex-col rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
                 icon={Award}
                 title="Top Offtake Beneficiaries"
                 subtitle="Farmers with the highest purchase volume"
                 tint="purple"
               />
-              <CardContent className="flex-1 px-6 pb-6">
-                <div className="space-y-3 h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+              <CardContent className="flex-1 px-5 pb-5">
+                <div className="custom-scrollbar h-[270px] space-y-2.5 overflow-y-auto pr-2">
                   {topFarmers.length > 0 ? (
                     topFarmers.map((farmer, idx) => (
                       <div
                         key={idx}
-                        className="flex items-center justify-between p-3 rounded-xl bg-gray-50/80 border border-gray-100 hover:bg-blue-50 hover:border-blue-100 transition-all duration-200"
+                        className="flex items-center justify-between rounded-lg border border-slate-100 bg-slate-50/70 p-2.5 transition-all duration-200 hover:border-blue-100 hover:bg-blue-50"
                       >
                         <div className="flex items-center gap-3">
-                          <div className="flex items-center justify-center w-8 h-8 rounded-full bg-white border border-gray-200 text-blue-700 font-bold text-xs shadow-sm">
+                          <div className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 bg-white text-xs font-semibold text-blue-700">
                             {idx + 1}
                           </div>
                           <div>
-                            <p className="text-sm font-bold text-gray-800">
+                            <p className="text-xs font-semibold text-slate-800">
                               <span className="inline md:hidden">
                                 {farmer.name?.split(" ")[0] || farmer.name}
                               </span>
@@ -2709,7 +2961,7 @@ const SalesReport = () => {
                           </div>
                         </div>
                         <div className="text-right">
-                          <p className="text-sm font-bold text-green-700">
+                          <p className="text-xs font-semibold text-green-700">
                             {formatCurrency(
                               farmer.purchaseCost ?? farmer.revenue ?? 0,
                             )}
@@ -2721,11 +2973,126 @@ const SalesReport = () => {
                       </div>
                     ))
                   ) : (
-                    <div className="h-full flex items-center justify-center text-sm text-gray-400">
+                    <div className="flex h-full items-center justify-center text-xs text-slate-400">
                       No farmer data available
                     </div>
                   )}
                 </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* -------------------------------------------------------------- */}
+          {/* Farmers per county (gender split) histogram + Recent Offtakes  */}
+          {/* -------------------------------------------------------------- */}
+          <div className="grid gap-4 md:grid-cols-2">
+            <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <SectionCardHeader
+                icon={Users}
+                title="Male & Female Farmers(County)"
+                subtitle="Beneficiary gender split across counties for the selected period"
+                tint="blue"
+              />
+              <CardContent className="px-4 pb-5 sm:px-5">
+                {countyGenderData.length > 0 ? (
+                  <div className="h-[285px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={countyGenderData}
+                        margin={{ top: 5, right: 10, left: 0, bottom: 5 }}
+                        barGap={4}
+                      >
+                        <CartesianGrid
+                          strokeDasharray="3 3"
+                          stroke="#f1f5f9"
+                          vertical={false}
+                        />
+                        <XAxis
+                          dataKey="name"
+                          tick={{ fontSize: 10, fill: "#64748b" }}
+                          interval={0}
+                          angle={-25}
+                          textAnchor="end"
+                          height={60}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis
+                          tick={{ fontSize: 10, fill: "#334155" }}
+                          allowDecimals={false}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Legend wrapperStyle={{ fontSize: 11 }} />
+                        <Tooltip
+                          cursor={{ fill: "rgba(148,163,184,0.08)" }}
+                          contentStyle={TOOLTIP_STYLE}
+                          formatter={(value: number, name: string) => [
+                            `${value} farmers`,
+                            name,
+                          ]}
+                        />
+                        <Bar
+                          dataKey="Male"
+                          name="Male"
+                          fill={COLORS.darkBlue}
+                          radius={[4, 4, 0, 0]}
+                        />
+                        <Bar
+                          dataKey="Female"
+                          name="Female"
+                          fill={COLORS.orange}
+                          radius={[4, 4, 0, 0]}
+                        />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                ) : (
+                  <div className="flex h-[285px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
+                    No county gender data available for the selected range
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Recent Offtakes */}
+            <Card className="flex flex-col rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+              <SectionCardHeader
+                icon={History}
+                title="Recent Offtakes"
+                subtitle="Most recent offtake transactions recorded"
+                tint="teal"
+              />
+              <CardContent className="flex-1 px-5 pb-5">
+                {recentOfftakes.length > 0 ? (
+                  <div className="overflow-hidden rounded-xl border border-slate-100">
+                    <div className="grid grid-cols-[1.05fr_1fr_1.2fr_0.75fr] bg-slate-50 px-3 py-2.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                      <span>Date</span>
+                      <span>County</span>
+                      <span>Location</span>
+                      <span className="text-right">Goats</span>
+                    </div>
+                    <div className="custom-scrollbar max-h-[235px] divide-y divide-slate-100 overflow-y-auto">
+                      {recentOfftakes.map((offtake, idx) => (
+                        <div
+                          key={offtake.id || idx}
+                          className="grid grid-cols-[1.05fr_1fr_1.2fr_0.75fr] items-center gap-3 px-3 py-2.5 text-xs"
+                        >
+                          <span className="font-medium text-slate-900">{offtake.dateLabel}</span>
+                          <span className="truncate text-slate-600">{offtake.county || "Unknown"}</span>
+                          <span className="truncate text-slate-600">{offtake.location || "Unknown"}</span>
+                          <span className="text-right font-semibold tabular-nums text-slate-900">
+                            {formatNumber(offtake.animals)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex min-h-[220px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-xs text-slate-400">
+                    No recent offtake records available
+                  </div>
+                )}
               </CardContent>
             </Card>
           </div>
@@ -2734,15 +3101,15 @@ const SalesReport = () => {
         {/* ================================================================= */}
         {/* SECTION 2: FINANCIALS & TREND                                      */}
         {/* ================================================================= */}
-        <section className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100">
+        <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100">
           <div className="flex items-center gap-2 pb-1 border-b border-gray-200">
-            <DollarSign className="h-5 w-5 text-green-600" />
-            <h2 className="text-lg font-bold text-gray-800">
+            <DollarSign className="h-4 w-4 text-green-600" />
+            <h2 className="text-sm font-semibold text-slate-800">
               Financial and Expenses Tracks
             </h2>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <StatsCard
               title="Purchase Cost"
               value={millify(stats.totalPurchaseCost)}
@@ -2778,15 +3145,15 @@ const SalesReport = () => {
           </div>
 
           {/* Monthly Purchase Trend */}
-          <Card className="border border-slate-100 shadow-sm bg-white rounded-2xl">
+          <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
             <SectionCardHeader
               icon={TrendingUp}
               title="Monthly Purchase Trend"
               subtitle="Animals purchased month over month"
               tint="blue"
             />
-            <CardContent className="px-6 pb-6">
-              <ResponsiveContainer width="100%" height={380}>
+            <CardContent className="px-5 pb-5">
+              <ResponsiveContainer width="100%" height={320}>
                 <AreaChart data={monthlyTrend}>
                   <defs>
                     {hasLegacyPurchaseTrend ? (
@@ -2839,7 +3206,7 @@ const SalesReport = () => {
                   />
                   <XAxis
                     dataKey="month"
-                    tick={{ fontSize: 10, fill: "#64748b" }}
+                    tick={{ fontSize: 9, fill: "#64748b" }}
                     axisLine={false}
                     tickLine={false}
                     interval={0}
@@ -2850,7 +3217,7 @@ const SalesReport = () => {
                     textAnchor="end"
                   />
                   <YAxis
-                    tick={{ fontSize: 12, fill: "#64748b" }}
+                    tick={{ fontSize: 10, fill: "#64748b" }}
                     axisLine={false}
                     tickLine={false}
                   />
@@ -2901,24 +3268,24 @@ const SalesReport = () => {
         {/* ================================================================= */}
         {/* SECTION 3: ORDERS & REQUISITIONS                                   */}
         {/* ================================================================= */}
-        <section className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100">
+        <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-100">
           <div className="flex items-center gap-2 pb-1 border-b border-gray-200">
-            <Calendar className="h-5 w-5 text-green-600" />
-            <h2 className="text-lg font-bold text-gray-800">
+            <Calendar className="h-4 w-4 text-green-600" />
+            <h2 className="text-sm font-semibold text-slate-800">
               Orders and Requisition Tracks
             </h2>
           </div>
 
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-3">
             <StatsCard
-              title="Total Goat Orders Placed"
+              title="Animals Orders Placed"
               value={millify(stats.totalGoatOrdersPlaced)}
               icon={Package}
               subText=""
               color="blue"
             />
             <StatsCard
-              title="Total Goats Purchased"
+              title="Animals Purchased"
               value={millify(stats.totalGoatsPurchasedFromOrders)}
               icon={Beef}
               subText=""
@@ -2934,16 +3301,16 @@ const SalesReport = () => {
             />
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-2">
+          <div className="grid gap-4 xl:grid-cols-2">
             {/* Doughnut – Orders vs Purchased (maroon / yellow) */}
-            <Card className="border border-slate-100 bg-white shadow-sm rounded-2xl">
+            <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
                 icon={Package}
-                title="Orders vs Goats Purchased"
+                title="Orders vs Animals Purchased"
                 subtitle="Total ordered goats compared with goats bought for the selected period"
                 tint="maroon"
               />
-              <CardContent className="px-4 pb-6 sm:px-6">
+              <CardContent className="px-4 pb-5 sm:px-5">
                 <DoughnutBreakdown
                   data={orderPurchaseDoughnutData}
                   total={orderPurchaseDoughnutTotal}
@@ -2955,122 +3322,18 @@ const SalesReport = () => {
               </CardContent>
             </Card>
 
-            <Card className="border border-slate-100 bg-white shadow-sm rounded-2xl">
+            <Card className="rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
               <SectionCardHeader
                 icon={TrendingUp}
                 title="Monthly Requisition Trend"
                 subtitle="Requisition movement across the selected reporting window"
                 tint="orange"
               />
-              <CardContent className="px-4 pb-6 sm:px-6">
-                <ResponsiveContainer width="100%" height={360}>
-                  <AreaChart data={requisitionTrend} margin={{ top: 12, right: 8, bottom: 8, left: 0 }}>
-                    <defs>
-                      {hasLegacyRequisitionTrend ? (
-                        <linearGradient
-                          id="colorRequisitionTrend"
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor={COLORS.orange}
-                            stopOpacity={0.24}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor={COLORS.orange}
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      ) : (
-                        requisitionTrendSeries.map((series) => (
-                          <linearGradient
-                            key={series.key}
-                            id={`requisitionTrendGradient-${series.key}`}
-                            x1="0"
-                            y1="0"
-                            x2="0"
-                            y2="1"
-                          >
-                            <stop
-                              offset="5%"
-                              stopColor={series.color}
-                              stopOpacity={0.22}
-                            />
-                            <stop
-                              offset="95%"
-                              stopColor={series.color}
-                              stopOpacity={0}
-                            />
-                          </linearGradient>
-                        ))
-                      )}
-                    </defs>
-                    <CartesianGrid
-                      strokeDasharray="3 3"
-                      stroke="#f1f5f9"
-                      vertical={false}
-                    />
-                    <XAxis
-                      dataKey="month"
-                      tick={{ fontSize: 10, fill: "#64748b" }}
-                      axisLine={false}
-                      tickLine={false}
-                      interval={0}
-                      minTickGap={0}
-                      height={48}
-                      tickMargin={10}
-                      angle={-30}
-                      textAnchor="end"
-                    />
-                    <YAxis
-                      tick={{ fontSize: 12, fill: "#64748b" }}
-                      axisLine={false}
-                      tickLine={false}
-                    />
-                    {!hasLegacyRequisitionTrend && hasMultipleRequisitionYears && (
-                      <Legend />
-                    )}
-                    <Tooltip
-                      contentStyle={TOOLTIP_STYLE}
-                      formatter={(value: number | string, name: string) => [
-                        `${formatNumber(Number(value))} requisitions`,
-                        name,
-                      ]}
-                    />
-                    {hasLegacyRequisitionTrend ? (
-                      <Area
-                        type="monotone"
-                        dataKey="count"
-                        stroke={COLORS.orange}
-                        strokeWidth={2.4}
-                        fillOpacity={1}
-                        fill="url(#colorRequisitionTrend)"
-                        name="Requisitions"
-                      />
-                    ) : (
-                      requisitionTrendSeries.map((series) => (
-                        <Area
-                          key={series.key}
-                          type="monotone"
-                          dataKey={series.key}
-                          stroke={series.color}
-                          strokeWidth={2.4}
-                          fillOpacity={hasMultipleRequisitionYears ? 0 : 1}
-                          fill={
-                            hasMultipleRequisitionYears
-                              ? "transparent"
-                              : `url(#requisitionTrendGradient-${series.key})`
-                          }
-                          name={series.label}
-                        />
-                      ))
-                    )}
-                  </AreaChart>
-                </ResponsiveContainer>
+              <CardContent className="px-4 pb-5 sm:px-5">
+                <RequisitionTrendColumnChart
+                  data={requisitionTrend}
+                  series={requisitionTrendSeries}
+                />
               </CardContent>
             </Card>
           </div>
@@ -3082,60 +3345,159 @@ const SalesReport = () => {
         {/* sections with small/clean typography. Zero-value metrics are      */}
         {/* pushed to the bottom of each section.                             */}
         {/* ================================================================= */}
-        <section className="space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
-          <Card className="border-0 shadow-lg bg-gradient-to-br from-blue-50 via-white to-slate-50 rounded-2xl overflow-hidden">
-            <CardContent className="p-5 md:p-6">
-              <div className="flex items-center gap-3 pb-4 mb-5 border-b border-blue-100">
-                <div className="flex items-center justify-center w-11 h-11 rounded-full bg-blue-600 shadow-md shrink-0">
-                  <ClipboardList className="h-5 w-5 text-white" />
-                </div>
-                <div>
-                  <p className="text-xs font-bold tracking-wider text-blue-700 uppercase">
-                    Report Summary
-                  </p>
-                 
-                </div>
-              </div>
+        <section className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-700 delay-150">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-green-700">
+              Report Summary
+            </p>
+            <h2 className="mt-1 text-2xl font-bold tracking-tight text-slate-900">
+              Report Summary
+            </h2>
+            <p className="mt-1 text-sm text-slate-500">
+              A consolidated view of purchase volume, order fulfillment, revenue, and requisition activity.
+            </p>
+          </div>
 
-              <div className="space-y-5">
-                {summaryGroups.map((group) => (
-                  <div key={group.title}>
-                    <p className="text-[9.5px] font-medium uppercase tracking-wider text-blue-700/80 mb-2">
-                      {group.title}
-                    </p>
-                    <div className="grid grid-cols-2 grid-cols-3 gap-1.5">
-                      {group.items.map((item) => {
-                        const isZero = Number(item.value) === 0;
-                        return (
-                          <div
-                            key={item.label}
-                            className={`rounded-md border px-2.5 py-1.5 transition-all ${
-                              isZero
-                                ? "border-slate-100 bg-slate-50/60"
-                                : "border-slate-100 bg-white/80 hover:shadow-sm hover:border-blue-100"
-                            }`}
-                          >
-                            <p className="text-[8px] font-normal text-slate-800 uppercase tracking-wide leading-snug">
-                              {item.label}
-                            </p>
-                            <p
-                              className={`text-[11.5px] font-medium mt-0.5 leading-snug tracking-tight ${
-                                isZero ? "text-slate-400" : "text-gray-800"
-                              }`}
-                            >
-                              {item.prefix ?? ""}
-                              {formatFullValue(item.value)}
-                              {item.suffix ?? ""}
-                            </p>
-                          </div>
-                        );
-                      })}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
+              <CardContent className="border-l-4 border-green-600 p-5">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-green-50">
+                    <Beef className="h-4 w-4 text-green-700" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Purchases & Orders</h3>
+                    <p className="text-[11px] text-slate-500">Animals purchased, species mix, and order progress</p>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-[1.25fr_1fr]">
+                  <div className="rounded-xl bg-green-50 p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-green-700">Total Animals Purchased</p>
+                    <p className="mt-1 text-2xl font-bold text-slate-900">{formatFullValue(stats.totalAnimals)}</p>
+                    <div className="mt-4 space-y-2">
+                      <div>
+                        <div className="mb-1 flex justify-between text-[11px] font-semibold text-slate-700">
+                          <span>Goats</span>
+                          <span>{goatPct}%</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-green-100">
+                          <div className="h-full rounded-full bg-green-700" style={{ width: `${goatPct}%` }} />
+                        </div>
+                      </div>
+                      <div>
+                        <div className="mb-1 flex justify-between text-[11px] font-semibold text-slate-700">
+                          <span>Sheep</span>
+                          <span>{sheepPct}%</span>
+                        </div>
+                        <div className="h-2 rounded-full bg-green-100">
+                          <div className="h-full rounded-full bg-teal-400" style={{ width: `${sheepPct}%` }} />
+                        </div>
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+
+                  <div className="grid gap-3">
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Goats Purchased</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(stats.totalGoats)}</p>
+                      <p className="text-[11px] font-semibold text-slate-500">({goatPct}%)</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Sheep Purchased</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(stats.totalSheep)}</p>
+                      <p className="text-[11px] font-semibold text-slate-500">({sheepPct}%)</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="my-5 border-t border-slate-200" />
+
+                <div className="mb-3 flex items-center gap-2">
+                  <Package className="h-4 w-4 text-green-700" />
+                  <h4 className="text-sm font-bold text-slate-800">Orders Fulfilled</h4>
+                </div>
+                <div className="grid gap-3 md:grid-cols-[1.25fr_1fr]">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Order Fulfillment</p>
+                    <p className="mt-1 text-2xl font-bold text-slate-900">{orderFulfillmentPct.toFixed(1)}%</p>
+                    <div className="mt-3 h-2 rounded-full bg-green-100">
+                      <div className="h-full rounded-full bg-green-700" style={{ width: `${orderFulfillmentPct}%` }} />
+                    </div>
+                    <p className="mt-2 text-[10px] text-slate-500">
+                      {formatFullValue(stats.totalGoatsPurchasedFromOrders)} of {formatFullValue(stats.totalGoatOrdersPlaced)} ordered animals purchased
+                    </p>
+                  </div>
+                  <div className="grid gap-3">
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Ordered</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(stats.totalGoatOrdersPlaced)}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Purchased</p>
+                      <p className="mt-1 text-lg font-bold text-slate-900">{formatFullValue(stats.totalGoatsPurchasedFromOrders)}</p>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.06)]">
+              <CardContent className="border-l-4 border-emerald-600 p-5">
+                <div className="mb-4 flex items-center gap-3">
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-emerald-50">
+                    <DollarSign className="h-4 w-4 text-emerald-700" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">Financials & Requisitions</h3>
+                    <p className="text-[11px] text-slate-500">Revenue, purchase cost, profit, and requisition completion</p>
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-5">
+                  <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Net Profit</p>
+                  <p className="mt-1 text-3xl font-bold text-slate-900">KES {formatFullValue(stats.netProfit)}</p>
+                </div>
+
+                <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  <div className="rounded-xl border border-slate-200 bg-white p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Total Revenue</p>
+                    <p className="mt-1 text-xl font-bold text-slate-900">KES {formatFullValue(stats.totalRevenue)}</p>
+                    <p className="text-[11px] text-slate-500">Carcass-weight revenue</p>
+                  </div>
+                  <div className="rounded-xl bg-emerald-50 p-4">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-emerald-700">Purchase Cost Share</p>
+                    <p className="mt-1 text-xl font-bold text-slate-900">{purchaseCostSharePct.toFixed(1)}%</p>
+                    <p className="text-[11px] text-slate-500">Purchase cost against revenue</p>
+                  </div>
+                </div>
+
+                <div className="mt-5">
+                  <div className="flex h-3 overflow-hidden rounded-full bg-slate-100">
+                    <div className="bg-emerald-700" style={{ width: `${purchaseCostSharePct}%` }} />
+                    <div className="bg-lime-500" style={{ width: `${Math.max(0, 100 - purchaseCostSharePct)}%` }} />
+                  </div>
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Purchase Cost</p>
+                      <p className="mt-1 text-sm font-bold text-slate-900">KES {formatFullValue(stats.totalPurchaseCost)}</p>
+                      <p className="mt-1 text-[11px] text-slate-500">Expenses: KES {formatFullValue(stats.expenses)}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Requisitions Complete</p>
+                      <p className="mt-1 text-sm font-bold text-slate-900">{requisitionCompletionPct.toFixed(1)}%</p>
+                      <p className="mt-1 text-[11px] text-slate-500">
+                        {formatFullValue(stats.completedRequisitions)} of {formatFullValue(stats.totalRequisitions)} requisitions
+                      </p>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-[11px] text-slate-500">
+                    Requisition expenses total KES {formatFullValue(stats.requisitionExpenses)} for the selected period.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </section>
 
         {/* ================================================================= */}
@@ -3225,6 +3587,7 @@ const SalesReport = () => {
               <Button
                 onClick={saveSalesInputs}
                 disabled={isSavingSalesInputs}
+                className="bg-green-600 text-white hover:bg-green-700"
               >
                 {isSavingSalesInputs ? (
                   <>

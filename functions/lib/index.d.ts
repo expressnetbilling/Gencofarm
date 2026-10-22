@@ -16,3 +16,4 @@ import * as admin from "firebase-admin";
  */
 export declare const getDb: () => admin.database.Database;
 export { sendEmail } from "./send-email";
+export { downloadCapacityDocument } from "./download-capacity-document";

@@ -1,14 +1,12 @@
-import { useState, useEffect, useCallback, useMemo, useRef, type KeyboardEvent } from "react";
+import { useState, useEffect, useCallback, useMemo, type KeyboardEvent } from "react";
 import { fetchCollectionByProgrammes, type DatabaseRecord } from "@/lib/firebase";
 import { useAuth } from "@/contexts/AuthContext";
 import { useQuery } from "@tanstack/react-query";
 import { fetchAnalysisSummary } from "@/lib/analysis";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { 
-  PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip, 
-  AreaChart, Area, XAxis, YAxis, CartesianGrid, BarChart, Bar 
-} from "recharts";
-import { Users, GraduationCap, Beef, Map, UserCheck, AlertCircle, Activity, Eye, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  Users, GraduationCap, Beef, UserCheck, AlertCircle, Eye, MapPin,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DashboardInsights } from "@/components/DashboardInsights";
 import { Input } from "@/components/ui/input";
@@ -25,11 +23,10 @@ import {
 // --- Constants ---
 const COLORS = {
   navy: "#1e3a8a",
-  orange: "#f97316", 
+  orange: "#f97316",
   yellow: "#f59e0b",
   maroon: "#7f1d1d"
 };
-const BAR_COLORS = [COLORS.navy, COLORS.orange, COLORS.yellow];
 
 // Target Constants
 const TARGETS = {
@@ -40,6 +37,15 @@ const TARGETS = {
 const QUARTER_TARGET = 351;
 const QUARTER_TARGET_MILESTONES = [351, 351, 351, 351];
 const PROGRESS_ANALYTICS_QUERY_VERSION = "v6";
+const ALL_COUNTIES_VALUE = "ALL_COUNTIES";
+
+const normalizeCountyFilterValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const matchesCountySelection = (recordCounty: unknown, selectedCounty: string): boolean => {
+  if (!selectedCounty || selectedCounty === ALL_COUNTIES_VALUE) return true;
+  return normalizeCountyFilterValue(recordCounty) === normalizeCountyFilterValue(selectedCounty);
+};
 const EMPTY_STATS = {
   total: 0,
   trained: 0,
@@ -78,9 +84,10 @@ interface TrainingData {
   createdAt?: number | string;
   totalFarmers?: number;
   programme?: string;
+  county?: string;
 }
 
-type ProgressStatus = "target-met" | "on-track" | "above-average" | "below-average" | "action-needed" | "not-started";
+type ProgressStatus = "target-met" | "completed" | "in-progress" | "below-average" | "action-needed" | "not-started";
 
 type ProgressPeriodKey = "q1" | "q2" | "q3" | "q4";
 
@@ -106,52 +113,7 @@ interface UserProgress {
   periods: ProgressPeriod[];
 }
 
-interface PieDataItem {
-  name: string;
-  value: number;
-  color: string;
-}
-
-interface TimeSeriesItem {
-  name: string;
-  farmers: any;
-  animals: any;
-}
-
 type FilterMode = "weekly" | "monthly" | "yearly" | "custom";
-
-const getGenderColor = (label: string): string => {
-  const normalized = label.trim().toLowerCase();
-  if (normalized === "male") return COLORS.navy;
-  if (normalized === "female") return COLORS.orange;
-  return COLORS.yellow;
-};
-
-const getAnimalCensusColor = (label: string): string => {
-  const normalized = label.trim().toLowerCase();
-  if (normalized === "goats") return COLORS.maroon;
-  if (normalized === "sheep") return COLORS.orange;
-  return COLORS.navy;
-};
-
-const normalizePieChartData = (
-  data: Array<Partial<PieDataItem>> | undefined,
-  chartType: "gender" | "animal",
-): PieDataItem[] =>
-  (data || [])
-    .map((item) => {
-      const value = typeof item?.value === "number" ? item.value : Number(item?.value || 0);
-      return {
-        name: typeof item?.name === "string" ? item.name : "",
-        value: Number.isFinite(value) ? value : 0,
-      };
-    })
-    .filter((item) => item.name && item.value > 0)
-    .map((item) => ({
-      name: item.name,
-      value: item.value,
-      color: chartType === "gender" ? getGenderColor(item.name) : getAnimalCensusColor(item.name),
-    }));
 
 // --- Helper Functions ---
 
@@ -270,18 +232,6 @@ const addDays = (date: Date, days: number): Date => {
   result.setDate(result.getDate() + days);
   result.setHours(0, 0, 0, 0);
   return result;
-};
-
-const isSameCalendarWeek = (start: Date, end: Date): boolean => {
-  const startOfWeek = new Date(start);
-  startOfWeek.setDate(start.getDate() - start.getDay());
-  startOfWeek.setHours(0, 0, 0, 0);
-
-  const endOfWeek = new Date(startOfWeek);
-  endOfWeek.setDate(startOfWeek.getDate() + 6);
-  endOfWeek.setHours(23, 59, 59, 999);
-
-  return end >= startOfWeek && end <= endOfWeek;
 };
 
 const countCoveredWeeks = (start: Date, end: Date): number => {
@@ -442,19 +392,18 @@ const getGoatTotal = (goats: any): number => {
 
 const getProgressStatus = (
   progressPercentage: number,
-  options: { allowOnTrack?: boolean; allowTargetMet?: boolean } = {},
+  options: { allowTargetMet?: boolean } = {},
 ): ProgressStatus => {
   if (options.allowTargetMet && progressPercentage >= 100) return "target-met";
-  if (options.allowOnTrack !== false && progressPercentage >= 70) return "on-track";
-  if (progressPercentage >= 50) return "above-average";
+  if (progressPercentage >= 50) return "in-progress";
   if (progressPercentage >= 30) return "below-average";
   return "action-needed";
 };
 
 const getProgressStatusLabel = (status: ProgressStatus): string => {
   if (status === "target-met") return "Target met";
-  if (status === "on-track") return "On track";
-  if (status === "above-average") return "Above Average";
+  if (status === "completed") return "Complete";
+  if (status === "in-progress") return "In Progress";
   if (status === "below-average") return "Below Average";
   if (status === "not-started") return "Not started";
   return "Action Needed";
@@ -462,8 +411,8 @@ const getProgressStatusLabel = (status: ProgressStatus): string => {
 
 const getProgressBarClass = (status: ProgressStatus): string => {
   if (status === "target-met") return "bg-green-500";
-  if (status === "on-track") return "bg-blue-500";
-  if (status === "above-average") return "bg-emerald-500";
+  if (status === "completed") return "bg-green-500";
+  if (status === "in-progress") return "bg-blue-500";
   if (status === "below-average") return "bg-amber-400";
   if (status === "not-started") return "bg-slate-300";
   return "bg-red-400";
@@ -471,11 +420,36 @@ const getProgressBarClass = (status: ProgressStatus): string => {
 
 const getProgressTextClass = (status: ProgressStatus): string => {
   if (status === "target-met") return "text-green-700";
-  if (status === "on-track") return "text-blue-700";
-  if (status === "above-average") return "text-emerald-700";
+  if (status === "completed") return "text-green-700";
+  if (status === "in-progress") return "text-blue-700";
   if (status === "below-average") return "text-amber-700";
   if (status === "not-started") return "text-slate-600";
   return "text-red-700";
+};
+
+const getStatusBadgeClass = (status: ProgressStatus): string => {
+  if (status === "target-met") return "bg-green-50 text-green-700";
+  if (status === "completed") return "bg-green-50 text-green-700";
+  if (status === "in-progress") return "bg-blue-50 text-blue-700";
+  if (status === "below-average") return "bg-amber-50 text-amber-700";
+  if (status === "not-started") return "bg-slate-100 text-slate-600";
+  return "bg-red-50 text-red-700";
+};
+
+const getStatusDotClass = (status: ProgressStatus): string => {
+  if (status === "target-met") return "bg-green-500";
+  if (status === "completed") return "bg-green-500";
+  if (status === "in-progress") return "bg-blue-500";
+  if (status === "below-average") return "bg-amber-500";
+  if (status === "not-started") return "bg-slate-400";
+  return "bg-red-500";
+};
+
+const getOfficerInitials = (name: string): string => {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
 };
 
 const isCompletedQuarter = (periodEnd: Date, analysisYear: number): boolean => {
@@ -487,6 +461,9 @@ const isCompletedQuarter = (periodEnd: Date, analysisYear: number): boolean => {
   normalizedEnd.setHours(23, 59, 59, 999);
   return today > normalizedEnd;
 };
+
+const isPastAnalysisYear = (analysisYear: number): boolean =>
+  analysisYear < getToday().getFullYear();
 
 const getAnalysisYearFromDateRange = (
   dateRange: { startDate?: string; endDate?: string },
@@ -582,21 +559,17 @@ const LivestockFarmersAnalytics = () => {
   const [availablePrograms, setAvailablePrograms] = useState<string[]>([]);
   const [filterMode, setFilterMode] = useState<FilterMode>("monthly");
 
-  // Chart Data States
-  const [genderData, setGenderData] = useState<PieDataItem[]>([]);
-  const [animalCensusData, setAnimalCensusData] = useState<PieDataItem[]>([]); 
-  const [weeklyPerformanceData, setWeeklyPerformanceData] = useState<TimeSeriesItem[]>([]); 
-  const [subcountyPerformanceData, setSubcountyPerformanceData] = useState<any[]>([]);
   const [localUserProgressData, setLocalUserProgressData] = useState<UserProgress[]>([]);
   const [selectedOfficer, setSelectedOfficer] = useState<UserProgress | null>(null);
   const [isOfficerTargetsOpen, setIsOfficerTargetsOpen] = useState(false);
-  const filterStripRef = useRef<HTMLDivElement | null>(null);
-  
+  const [officerDialogYear, setOfficerDialogYear] = useState(() => String(getToday().getFullYear()));
+
   const [stats, setStats] = useState(EMPTY_STATS);
 
   const [dateRange, setDateRange] = useState<{ startDate: string; endDate: string }>(() => getCurrentMonthDates());
   const [draftDateRange, setDraftDateRange] = useState<{ startDate: string; endDate: string }>(() => getCurrentMonthDates());
   const [selectedYear, setSelectedYear] = useState(() => String(getToday().getFullYear()));
+  const [selectedCounty, setSelectedCounty] = useState<string>(ALL_COUNTIES_VALUE);
   const [pendingDateKey, setPendingDateKey] = useState<"startDate" | "endDate" | null>(null);
   const hasActiveDateFilters = Boolean(dateRange.startDate || dateRange.endDate);
   const targetMode = useMemo(
@@ -645,6 +618,15 @@ const LivestockFarmersAnalytics = () => {
     const years = Array.from({ length: 10 }, (_, index) => String(currentYear - index));
     return selectedYear && !years.includes(selectedYear) ? [selectedYear, ...years] : years;
   }, [selectedYear]);
+  const countyOptions = useMemo(() => {
+    const counties = new Map<string, string>();
+    allFarmers.forEach((farmer) => {
+      const county = String(farmer.county || "").trim();
+      const key = normalizeCountyFilterValue(county);
+      if (key && !counties.has(key)) counties.set(key, county);
+    });
+    return Array.from(counties.values()).sort((left, right) => left.localeCompare(right));
+  }, [allFarmers]);
   const quarterTargets = useMemo(() => buildQuarterTargets(quarterYear), [quarterYear]);
   const accessibleProgrammes = useMemo(
     () => resolveAccessibleProgrammes(userCanViewAllProgrammeData, allowedProgrammes),
@@ -656,10 +638,6 @@ const LivestockFarmersAnalytics = () => {
   });
   const resetAnalyticsState = useCallback(() => {
     setStats(EMPTY_STATS);
-    setGenderData([]);
-    setAnimalCensusData([]);
-    setWeeklyPerformanceData([]);
-    setSubcountyPerformanceData([]);
     setFilteredData([]);
     setLocalUserProgressData([]);
   }, []);
@@ -675,6 +653,7 @@ const LivestockFarmersAnalytics = () => {
       dateRange.startDate,
       dateRange.endDate,
       selectedYear,
+      selectedCounty,
       targetMode,
       computedTarget,
     ],
@@ -684,6 +663,7 @@ const LivestockFarmersAnalytics = () => {
         programme: activeProgram === ALL_PROGRAMMES_VALUE ? "All" : (activeProgram || null),
         dateRange: hasActiveDateFilters ? dateRange : null,
         selectedYear: selectedYear || null,
+        county: selectedCounty === ALL_COUNTIES_VALUE ? null : selectedCounty,
         timeFrame: targetMode,
         target: hasActiveDateFilters ? computedTarget : null,
       }),
@@ -716,10 +696,6 @@ const LivestockFarmersAnalytics = () => {
       femaleFarmers: analysis.femaleFarmers || 0,
       totalTrainedFromCapacity: analysis.totalTrainedFromCapacity || 0,
     });
-    setGenderData(normalizePieChartData(analysis.genderData, "gender"));
-    setAnimalCensusData(normalizePieChartData(analysis.animalCensusData, "animal"));
-    setWeeklyPerformanceData(analysis.weeklyPerformanceData || []);
-    setSubcountyPerformanceData(analysis.subcountyPerformanceData || []);
     setFilteredData([]);
   }, [analyticsQuery.data, hasActiveDateFilters, resetAnalyticsState]);
 
@@ -844,6 +820,7 @@ const LivestockFarmersAnalytics = () => {
             id: item.id,
             ...item,
             programme,
+            county: item.county || item.County || "",
             startDate: item.startDate || item.start_date || item.date || item.Date,
             createdAt: item.createdAt ?? item.created_at ?? item.startDate ?? item.start_date ?? item.date ?? item.Date,
           };
@@ -888,7 +865,7 @@ const LivestockFarmersAnalytics = () => {
   useEffect(() => {
     if (USE_REMOTE_ANALYTICS) return;
     applyFilters();
-  }, [allFarmers, dateRange, effectiveTarget, filterMode, hasActiveDateFilters, resetAnalyticsState, trainingRecords]);
+  }, [allFarmers, dateRange, effectiveTarget, filterMode, hasActiveDateFilters, resetAnalyticsState, selectedCounty, trainingRecords]);
 
   const isDateInRange = (date: any, startDate: string, endDate: string): boolean => {
     if (!startDate && !endDate) return true;
@@ -906,11 +883,12 @@ const LivestockFarmersAnalytics = () => {
   };
 
   const applyFilters = () => {
-    const filtered = hasActiveDateFilters
-      ? allFarmers.filter((farmer) =>
-        isDateInRange(getFarmerRegistrationDateValue(farmer), dateRange.startDate, dateRange.endDate)
-      )
-      : allFarmers;
+    const filtered = allFarmers.filter((farmer) => {
+      const matchesDate = hasActiveDateFilters
+        ? isDateInRange(getFarmerRegistrationDateValue(farmer), dateRange.startDate, dateRange.endDate)
+        : true;
+      return matchesDate && matchesCountySelection(farmer.county, selectedCounty);
+    });
     setFilteredData(filtered);
     updateAnalytics(filtered);
   };
@@ -922,13 +900,14 @@ const LivestockFarmersAnalytics = () => {
 
     // Training Stats
     const filteredTrainingRecords = trainingRecords.filter((record) =>
-      isDateInRange(record.startDate || record.createdAt, dateRange.startDate, dateRange.endDate)
+      isDateInRange(record.startDate || record.createdAt, dateRange.startDate, dateRange.endDate) &&
+      matchesCountySelection(record.county, selectedCounty)
     );
     const totalTrainedFromCapacity = filteredTrainingRecords.reduce(
       (sum, t) => sum + parseNumericValue(t.totalFarmers),
       0
     );
-    
+
     // Capacity-building totals can include repeat attendees, so keep coverage bounded to registered farmers.
     const trainingRate = data.length > 0 ?
       (Math.min(totalTrainedFromCapacity, data.length) / data.length) * 100 :
@@ -937,7 +916,7 @@ const LivestockFarmersAnalytics = () => {
     // Animal Census
     let totalGoats = 0;
     let totalSheep = 0;
-    
+
     data.forEach(farmer => {
       const g = getGoatTotal(farmer.goats);
       totalGoats += g;
@@ -947,8 +926,8 @@ const LivestockFarmersAnalytics = () => {
     const totalAnimals = totalGoats + totalSheep;
 
     // Set Stats
-    setStats({ 
-      total: data.length, 
+    setStats({
+      total: data.length,
       trained: totalTrainedFromCapacity,
       totalAnimals,
       trainingRate,
@@ -957,58 +936,7 @@ const LivestockFarmersAnalytics = () => {
       totalTrainedFromCapacity
     });
 
-    // 1. Gender Data
-    const genderChartData: PieDataItem[] = [
-      { name: "Male", value: Number(maleCount), color: getGenderColor("Male") },
-      { name: "Female", value: Number(femaleCount), color: getGenderColor("Female") },
-    ];
-    setGenderData(genderChartData);
-
-    // 2. Animal Census Data
-    const animalChartData: PieDataItem[] = [
-      { name: "Goats", value: Number(totalGoats), color: getAnimalCensusColor("Goats") },
-      { name: "Sheep", value: Number(totalSheep), color: getAnimalCensusColor("Sheep") },
-    ];
-    setAnimalCensusData(animalChartData);
-
-    // 3. Weekly Performance (Farmers vs Livestock)
-    const weeks: Record<number, { farmers: number; animals: number }> = {
-      1: { farmers: 0, animals: 0 },
-      2: { farmers: 0, animals: 0 },
-      3: { farmers: 0, animals: 0 },
-      4: { farmers: 0, animals: 0 }
-    };
-
-    data.forEach(farmer => {
-      const date = new Date(farmer.createdAt);
-      const day = date.getDate();
-      const weekNum = Math.ceil(day / 7); 
-      if (weekNum >= 1 && weekNum <= 4) {
-        weeks[weekNum].farmers++;
-        weeks[weekNum].animals += getGoatTotal(farmer.goats) + parseNumericValue(farmer.sheep);
-      }
-    });
-
-    const weeklyChartData: TimeSeriesItem[] = [
-      { name: "Week 1", farmers: weeks[1].farmers, animals: weeks[1].animals },
-      { name: "Week 2", farmers: weeks[2].farmers, animals: weeks[2].animals },
-      { name: "Week 3", farmers: weeks[3].farmers, animals: weeks[3].animals },
-      { name: "Week 4", farmers: weeks[4].farmers, animals: weeks[4].animals },
-    ];
-    setWeeklyPerformanceData(weeklyChartData);
-
-    // 4. Subcounty Performance
-    const subcountyStats: Record<string, number> = {};
-    data.forEach(farmer => {
-      const sc = farmer.subcounty || "Unknown";
-      subcountyStats[sc] = (subcountyStats[sc] || 0) + 1;
-    });
-    const scData = Object.entries(subcountyStats)
-      .map(([name, value]) => ({ name, value }))
-      .sort((a, b) => b.value - a.value)
-      .slice(0, 15);
-    setSubcountyPerformanceData(scData);
-
+    // Field officer performance (current period)
     const currentPeriodStats: Record<string, { count: number; counties: Set<string> }> = {};
     data.forEach((farmer) => {
       const officerName = String(farmer.username || "Unknown User").trim() || "Unknown User";
@@ -1063,6 +991,7 @@ const LivestockFarmersAnalytics = () => {
       ...Object.keys(quarterlyStats),
     ]);
     const currentTarget = Math.max(1, Math.round(effectiveTarget));
+    const isPastYearView = isPastAnalysisYear(quarterYear);
 
     const localProgress = [...officerNames]
       .map((name) => {
@@ -1072,7 +1001,9 @@ const LivestockFarmersAnalytics = () => {
           counties: new Set<string>(),
         };
         const currentProgressPercentage = currentTarget > 0 ? (currentStats.count / currentTarget) * 100 : 0;
-        const currentStatus = getProgressStatus(currentProgressPercentage);
+        const currentStatus: ProgressStatus = isPastYearView
+          ? "completed"
+          : getProgressStatus(currentProgressPercentage);
         const counties = [...new Set([...currentStats.counties, ...quarterData.counties])];
         const periods = quarterTargets.map((period) => {
           const count = quarterData.periods[period.key];
@@ -1081,7 +1012,9 @@ const LivestockFarmersAnalytics = () => {
           const progressPercentage = period.target > 0 ? (count / period.target) * 100 : 0;
           const status = upcoming
             ? "not-started"
-            : getProgressStatus(progressPercentage, { allowOnTrack: !completed, allowTargetMet: completed });
+            : isPastYearView
+              ? "completed"
+              : getProgressStatus(progressPercentage, { allowTargetMet: completed });
           return {
             key: period.key,
             label: period.label,
@@ -1139,7 +1072,7 @@ const LivestockFarmersAnalytics = () => {
               progressPercentage,
               status: upcoming
                 ? "not-started"
-                : getProgressStatus(progressPercentage, { allowOnTrack: !completed, allowTargetMet: completed }),
+                : getProgressStatus(progressPercentage, { allowTargetMet: completed }),
               met: !upcoming && count >= target,
               upcoming,
             };
@@ -1147,7 +1080,9 @@ const LivestockFarmersAnalytics = () => {
         const farmersRegistered = Number(user.farmersRegistered || 0);
         const target = Number(effectiveTarget || user.target || TARGETS.yearly);
         const progressPercentage = target > 0 ? (farmersRegistered / target) * 100 : 0;
-        const status = getProgressStatus(progressPercentage);
+        const status: ProgressStatus = isPastAnalysisYear(quarterYear)
+          ? "completed"
+          : getProgressStatus(progressPercentage);
         return {
           ...user,
           farmersRegistered,
@@ -1164,13 +1099,74 @@ const LivestockFarmersAnalytics = () => {
     const activeOfficerCount = userProgressData.filter((user) => user.farmersRegistered > 0).length;
     return activeOfficerCount > 0 ? stats.total / activeOfficerCount : 0;
   }, [stats.total, userProgressData]);
+  const selectedOfficerForYear = useMemo(() => {
+    if (!selectedOfficer) return null;
+    const year = Number.parseInt(officerDialogYear, 10);
+    if (!Number.isFinite(year)) return selectedOfficer;
+
+    const dialogQuarterTargets = buildQuarterTargets(year);
+    const quarterCountingCutoff = getQuarterCountingCutoff(year);
+    const isPastYearView = isPastAnalysisYear(year);
+    const periodCounts: Record<ProgressPeriodKey, number> = { q1: 0, q2: 0, q3: 0, q4: 0 };
+    const officerName = selectedOfficer.name.trim();
+
+    allFarmers.forEach((farmer) => {
+      const farmerOfficer = String(farmer.username || "Unknown User").trim() || "Unknown User";
+      if (farmerOfficer !== officerName) return;
+
+      const farmerDate = parseDate(getFarmerRegistrationDateValue(farmer));
+      if (!farmerDate || !quarterCountingCutoff) return;
+      if (farmerDate.getFullYear() !== year || farmerDate > quarterCountingCutoff) return;
+
+      dialogQuarterTargets.forEach((period) => {
+        if (farmerDate >= period.start && farmerDate <= period.end) {
+          periodCounts[period.key] += 1;
+        }
+      });
+    });
+
+    const periods = dialogQuarterTargets.map((period) => {
+      const count = periodCounts[period.key];
+      const upcoming = isUpcomingQuarter(period.start, year);
+      const completed = isCompletedQuarter(period.end, year);
+      const progressPercentage = period.target > 0 ? (count / period.target) * 100 : 0;
+      const status = upcoming
+        ? "not-started"
+        : isPastYearView
+          ? "completed"
+          : getProgressStatus(progressPercentage, { allowTargetMet: completed });
+
+      return {
+        key: period.key,
+        label: period.label,
+        count,
+        target: period.target,
+        progressPercentage,
+        status,
+        met: count >= period.target,
+        upcoming,
+      };
+    });
+    const farmersRegistered = periods.reduce((sum, period) => sum + period.count, 0);
+    const target = dialogQuarterTargets.reduce((sum, period) => sum + period.target, 0);
+    const progressPercentage = target > 0 ? (farmersRegistered / target) * 100 : 0;
+
+    return {
+      ...selectedOfficer,
+      farmersRegistered,
+      target,
+      progressPercentage,
+      status: isPastYearView ? "completed" : getProgressStatus(progressPercentage),
+      periods,
+    };
+  }, [allFarmers, officerDialogYear, selectedOfficer]);
   const visibleOfficerPeriods = useMemo(() => {
-    if (!selectedOfficer) return [];
-    if (!hasActiveDateFilters) return selectedOfficer.periods;
+    if (!selectedOfficerForYear) return [];
+    if (!hasActiveDateFilters) return selectedOfficerForYear.periods;
 
     const visibleQuarterKeys = getQuarterKeysForDateRange(dateRange);
-    return selectedOfficer.periods.filter((period) => visibleQuarterKeys.includes(period.key));
-  }, [dateRange, hasActiveDateFilters, selectedOfficer]);
+    return selectedOfficerForYear.periods.filter((period) => visibleQuarterKeys.includes(period.key));
+  }, [dateRange, hasActiveDateFilters, selectedOfficerForYear]);
 
   const commitDateRange = useCallback((nextRange: { startDate: string; endDate: string }) => {
     setDateRange(nextRange);
@@ -1262,70 +1258,23 @@ const LivestockFarmersAnalytics = () => {
     setDateRange(nextRange);
     setDraftDateRange(nextRange);
     setSelectedYear("");
+    setSelectedCounty(ALL_COUNTIES_VALUE);
     setFilterMode("yearly"); // Reset to yearly as default after clearing
     setPendingDateKey(null);
     setSelectedOfficer(null);
     setIsOfficerTargetsOpen(false);
   };
 
-  const renderCustomizedLabel = useCallback(({
-    cx, cy, midAngle, innerRadius, outerRadius, percent
-  }: any) => {
-    if (percent === 0) return null;
-    const RADIAN = Math.PI / 180;
-    const radius = innerRadius + (outerRadius - innerRadius) * 0.5;
-    const x = cx + radius * Math.cos(-midAngle * RADIAN);
-    const y = cy + radius * Math.sin(-midAngle * RADIAN);
-    return (
-      <text 
-        x={x} 
-        y={y} 
-        fill="white" 
-        textAnchor={x > cx ? 'start' : 'end'} 
-        dominantBaseline="central"
-        fontSize="12"
-        fontWeight="bold"
-      >
-        {`${(percent * 100).toFixed(0)}%`}
-      </text>
-    );
-  }, []);
-
-  const renderAnimalCensusTooltip = useCallback(({ active, payload }: any) => {
-    if (!active || !payload?.length) return null;
-
-    const segment = payload[0]?.payload;
-    if (!segment) return null;
-
-    return (
-      <div className="rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-[0_12px_28px_rgba(15,23,42,0.12)]">
-        <div className="flex items-center gap-2">
-          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />
-          <span className="text-sm font-medium text-slate-700">{segment.name}</span>
-        </div>
-        <p className="mt-1 text-sm font-semibold text-slate-900">
-          {Number(segment.value || 0).toLocaleString()} animals
-        </p>
-      </div>
-    );
-  }, []);
-
   const getFilterButtonClass = (isActive: boolean) =>
     isActive
       ? "text-xs h-9 bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100"
       : "text-xs h-9";
 
-  const scrollFilterStripBy = useCallback((direction: "left" | "right") => {
-    const strip = filterStripRef.current;
-    if (!strip) return;
-    const offset = direction === "left" ? -220 : 220;
-    strip.scrollBy({ left: offset, behavior: "smooth" });
-  }, []);
-
   const openOfficerTargets = useCallback((officer: UserProgress) => {
+    setOfficerDialogYear(selectedYear || String(quarterYear));
     setSelectedOfficer(officer);
     setIsOfficerTargetsOpen(true);
-  }, []);
+  }, [quarterYear, selectedYear]);
 
   const StatsCard = ({ title, value, icon: Icon, description, color = "navy" }: any) => (
     <Card className="relative overflow-hidden group hover:shadow-xl transition-all duration-300 border-0 bg-gradient-to-br from-white to-gray-50">
@@ -1385,100 +1334,83 @@ const LivestockFarmersAnalytics = () => {
         ) : null}
 
         <Card className="w-full border-0 bg-white shadow-lg">
-          <CardContent className="px-3 py-3">
-            <div className="flex items-center gap-2">
+          <CardContent className="px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <Input
+                type="date"
+                value={draftDateRange.startDate}
+                onChange={(e) => handleDateRangeChange("startDate", e.target.value)}
+                onFocus={() => handleDateInputFocus("startDate")}
+                onBlur={handleDateInputBlur}
+                onKeyDown={handleDateInputKeyDown}
+                data-pending={pendingDateKey === "startDate" ? "true" : undefined}
+                className="h-9 flex-1 min-w-[150px] border-gray-200 pr-2 text-xs focus:border-blue-500"
+              />
+
+              <Input
+                type="date"
+                value={draftDateRange.endDate}
+                onChange={(e) => handleDateRangeChange("endDate", e.target.value)}
+                onFocus={() => handleDateInputFocus("endDate")}
+                onBlur={handleDateInputBlur}
+                onKeyDown={handleDateInputKeyDown}
+                data-pending={pendingDateKey === "endDate" ? "true" : undefined}
+                className="h-9 flex-1 min-w-[150px] border-gray-200 pr-2 text-xs focus:border-blue-500"
+              />
+
+              {availablePrograms.length > 1 ? (
+                <Select value={activeProgram} onValueChange={setActiveProgram}>
+                  <SelectTrigger className="h-9 flex-1 min-w-[150px] border-gray-200 text-sm">
+                    <SelectValue placeholder="Select Programme" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">All Programmes</SelectItem>
+                    {availablePrograms.map((p) => (
+                      <SelectItem key={p} value={p}>
+                        {p}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              ) : null}
+
+              <Select value={selectedCounty} onValueChange={setSelectedCounty}>
+                <SelectTrigger className="h-9 flex-1 min-w-[150px] border-gray-200 text-sm">
+                  <SelectValue placeholder="Select County" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_COUNTIES_VALUE}>All Counties</SelectItem>
+                  {countyOptions.map((county) => (
+                    <SelectItem key={county} value={county}>
+                      {county}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
+              <Select value={selectedYear || ""} onValueChange={handleYearChange}>
+                <SelectTrigger className="h-9 flex-1 min-w-[150px] border-gray-200 text-sm">
+                  <SelectValue placeholder="Select Year" />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableYears.map((year) => (
+                    <SelectItem key={year} value={year}>
+                      {year}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+
               <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => scrollFilterStripBy("left")}
-                className="hidden h-9 w-9 shrink-0 rounded-full border border-slate-200 bg-white text-slate-800 shadow-sm hover:bg-slate-50 max-[900px]:inline-flex"
+                variant="outline"
+                onClick={setMonthFilter}
+                size="sm"
+                className={getFilterButtonClass(filterMode === "monthly")}
               >
-                <ChevronLeft className="h-5 w-5" />
-                <span className="sr-only">Scroll filters left</span>
+                This Month
               </Button>
-
-              <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                <div
-                  ref={filterStripRef}
-                  className="w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
-                >
-                  <div className="flex min-w-max flex-nowrap items-center gap-2 p-1">
-                    <Input
-                      type="date"
-                      value={draftDateRange.startDate}
-                      onChange={(e) => handleDateRangeChange("startDate", e.target.value)}
-                      onFocus={() => handleDateInputFocus("startDate")}
-                      onBlur={handleDateInputBlur}
-                      onKeyDown={handleDateInputKeyDown}
-                      data-pending={pendingDateKey === "startDate" ? "true" : undefined}
-                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
-                    />
-
-                    <Input
-                      type="date"
-                      value={draftDateRange.endDate}
-                      onChange={(e) => handleDateRangeChange("endDate", e.target.value)}
-                      onFocus={() => handleDateInputFocus("endDate")}
-                      onBlur={handleDateInputBlur}
-                      onKeyDown={handleDateInputKeyDown}
-                      data-pending={pendingDateKey === "endDate" ? "true" : undefined}
-                      className="h-9 w-[150px] shrink-0 border-gray-200 pr-2 text-xs focus:border-blue-500"
-                    />
-
-                    {availablePrograms.length > 1 ? (
-                      <Select value={activeProgram} onValueChange={setActiveProgram}>
-                        <SelectTrigger className="h-9 w-[150px] shrink-0 border-gray-200 text-sm">
-                          <SelectValue placeholder="Select Programme" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="ALL">All Programmes</SelectItem>
-                          {availablePrograms.map((p) => (
-                            <SelectItem key={p} value={p}>
-                              {p}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    ) : null}
-
-                    <Select value={selectedYear || ""} onValueChange={handleYearChange}>
-                      <SelectTrigger className="h-9 w-[150px] shrink-0 border-gray-200 text-sm">
-                        <SelectValue placeholder="Select Year" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableYears.map((year) => (
-                          <SelectItem key={year} value={year}>
-                            {year}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-
-                    <Button
-                      variant="outline"
-                      onClick={setMonthFilter}
-                      size="sm"
-                      className={getFilterButtonClass(filterMode === "monthly")}
-                    >
-                      This Month
-                    </Button>
-                    <Button onClick={clearFilters} variant="ghost" size="sm" className="h-9 shrink-0 text-red-500 hover:text-red-600">
-                      Clear
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => scrollFilterStripBy("right")}
-                className="hidden h-9 w-9 shrink-0 rounded-full border border-slate-200 bg-white text-slate-800 shadow-sm hover:bg-slate-50 max-[900px]:inline-flex"
-              >
-                <ChevronRight className="h-5 w-5" />
-                <span className="sr-only">Scroll filters right</span>
+              <Button onClick={clearFilters} variant="ghost" size="sm" className="h-9 shrink-0 text-red-500 hover:text-red-600">
+                Clear
               </Button>
             </div>
           </CardContent>
@@ -1501,31 +1433,24 @@ const LivestockFarmersAnalytics = () => {
         </Card>
       ) : null}
 
-      <DashboardInsights
-        accessibleProgrammes={accessibleProgrammes}
-        selectedProgramme={activeProgram}
-        title="Progress Dashboard Insights"
-        description="Dated insights shared from the performance dashboard overview."
-      />
-
       <div className="grid gap-4 md:grid-cols-3 lg:grid-cols-3">
-        <StatsCard 
-          title="Total Farmers" 
-          value={stats.total.toLocaleString()} 
+        <StatsCard
+          title="Total Farmers"
+          value={stats.total.toLocaleString()}
           icon={Users}
           description={`${stats.maleFarmers} Male (${stats.maleFarmers > 0 ? ((stats.maleFarmers / stats.total) * 100).toFixed(1) : 0}%) | ${stats.femaleFarmers} Female`}
           color="navy"
         />
-        <StatsCard 
-          title="Average of Registered Farmers" 
-          value={averageRegisteredFarmers.toFixed(1)} 
+        <StatsCard
+          title="Average of Registered Farmers"
+          value={averageRegisteredFarmers.toFixed(1)}
           icon={GraduationCap}
           description={`Per active field officer across ${stats.total.toLocaleString()} farmers`}
           color="yellow"
         />
-        <StatsCard 
-          title="Animals Census" 
-          value={stats.totalAnimals.toLocaleString()} 
+        <StatsCard
+          title="Animals Census"
+          value={stats.totalAnimals.toLocaleString()}
           icon={Beef}
           description="Total livestock count"
           color="orange"
@@ -1540,57 +1465,60 @@ const LivestockFarmersAnalytics = () => {
                 <UserCheck className="h-5 w-5 text-blue-600" />
                 Field Officers Performance
               </CardTitle>
-              
             </div>
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
               <table className="min-w-[980px] w-full border-collapse text-left">
-                <thead className="bg-blue-50">
+                <thead className="bg-slate-50">
                   <tr>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Field Officer</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Counties Active</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Farmers Registered</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Target</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Progress</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">Status</th>
-                    <th className="px-4 py-2 text-xs font-semibold uppercase tracking-wide text-blue-800">View</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Field Officer</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Counties Active</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Farmers Registered</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Target</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Progress</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">Status</th>
+                    <th className="px-6 py-3 text-xs font-semibold uppercase tracking-wide text-slate-500">View</th>
                   </tr>
                 </thead>
                 <tbody>
                   {userProgressData.map((user) => {
                     const statusLabel = getProgressStatusLabel(user.status);
                     return (
-                      <tr key={user.id} className="border-b border-slate-100 transition-colors hover:bg-blue-50/40">
-                        <td className="px-4 py-2 font-medium text-slate-900">
-                          <div className="leading-tight">{user.name}</div>
-                        </td>
-                        <td className="px-4 py-2">
-                          <span className="text-sm text-slate-600">{user.region || "N/A"}</span>
-                        </td>
-                        <td className="px-4 py-2 font-semibold text-slate-900">
-                          {user.farmersRegistered.toLocaleString()}
-                        </td>
-                        <td className="px-4 py-2 text-slate-600">{user.target.toLocaleString()}</td>
-                        <td className="px-4 py-2">
+                      <tr key={user.id} className="border-b border-slate-100 transition-colors hover:bg-slate-50/60">
+                        <td className="px-6 py-3">
                           <div className="flex items-center gap-3">
-                            <div className="h-2 w-28 rounded-full bg-slate-100">
-                              <div
-                                className={`h-2 rounded-full transition-all duration-500 ${getProgressBarClass(user.status)}`}
-                                style={{ width: `${Math.min(user.progressPercentage, 100)}%` }}
-                              />
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-sm font-semibold text-emerald-700">
+                              {getOfficerInitials(user.name)}
                             </div>
-                            <span className="w-12 text-right text-xs font-medium text-slate-600">
-                              {user.progressPercentage.toFixed(0)}%
-                            </span>
+                            <div className="leading-tight">
+                              <div className="font-medium text-slate-900">{user.name}</div>
+                              <div className="text-xs text-slate-500">Active officer</div>
+                            </div>
                           </div>
                         </td>
-                        <td className="px-4 py-2">
+                        <td className="px-6 py-3">
+                          <div className="flex items-center gap-1.5 text-sm text-slate-600">
+                            <MapPin className="h-4 w-4 text-emerald-600" />
+                            <span>{user.region || "N/A"}</span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-3 font-semibold text-emerald-600">
+                          {user.farmersRegistered.toLocaleString()}
+                        </td>
+                        <td className="px-6 py-3 text-slate-600">{user.target.toLocaleString()}</td>
+                        <td className="px-6 py-3">
                           <span className={`text-sm font-semibold ${getProgressTextClass(user.status)}`}>
+                            {user.progressPercentage.toFixed(0)}%
+                          </span>
+                        </td>
+                        <td className="px-6 py-3">
+                          <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold ${getStatusBadgeClass(user.status)}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${getStatusDotClass(user.status)}`} />
                             {statusLabel}
                           </span>
                         </td>
-                        <td className="px-4 py-2">
+                        <td className="px-6 py-3">
                           <Button
                             variant="outline"
                             size="icon"
@@ -1623,28 +1551,47 @@ const LivestockFarmersAnalytics = () => {
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2 text-gray-800">
               <Eye className="h-5 w-5 text-blue-600" />
-              {selectedOfficer ? `${selectedOfficer.name} Quarterly Targets ${analysisYearLabel}` : `Quarterly Targets (${analysisYearLabel})`}
+              {selectedOfficerForYear ? `${selectedOfficerForYear.name} Quarterly Targets ${officerDialogYear}` : `Quarterly Targets (${officerDialogYear})`}
             </DialogTitle>
-           
+
           </DialogHeader>
 
-          {selectedOfficer ? (
+          {selectedOfficerForYear ? (
             <div className="space-y-5">
+              <div className="flex flex-col gap-3 rounded-xl border border-blue-100 bg-blue-50/60 p-3 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-blue-800">Target year</p>
+                  <p className="mt-1 text-sm text-slate-600">Choose the year to view this officer's quarterly performance.</p>
+                </div>
+                <Select value={officerDialogYear} onValueChange={setOfficerDialogYear}>
+                  <SelectTrigger className="h-9 w-full border-blue-200 bg-white text-sm sm:w-[170px]">
+                    <SelectValue placeholder="Select Year" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableYears.map((year) => (
+                      <SelectItem key={year} value={year}>
+                        {year}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div className="grid gap-3 sm:grid-cols-3">
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-wide text-slate-500">Analysis Year</p>
-                  <p className="mt-1 text-sm font-semibold text-slate-900">{analysisYearLabel}</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{officerDialogYear}</p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-wide text-slate-500">Registered</p>
                   <p className="mt-1 text-sm font-semibold text-slate-900">
-                    {selectedOfficer.farmersRegistered.toLocaleString()} farmers
+                    {selectedOfficerForYear.farmersRegistered.toLocaleString()} farmers
                   </p>
                 </div>
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                   <p className="text-xs uppercase tracking-wide text-slate-500">Target Result</p>
-                  <p className={`mt-1 text-sm font-semibold ${getProgressTextClass(selectedOfficer.status)}`}>
-                    {getProgressStatusLabel(selectedOfficer.status)}
+                  <p className={`mt-1 text-sm font-semibold ${getProgressTextClass(selectedOfficerForYear.status)}`}>
+                    {getProgressStatusLabel(selectedOfficerForYear.status)}
                   </p>
                 </div>
               </div>
@@ -1663,8 +1610,7 @@ const LivestockFarmersAnalytics = () => {
                   <tbody>
                     {visibleOfficerPeriods.map((period) => {
                       const progressPercent = Math.min(period.progressPercentage, 100);
-                      const fallbackQuarter = quarterTargets.find((entry) => entry.key === period.key);
-                      const isUpcoming = period.upcoming ?? (fallbackQuarter ? isUpcomingQuarter(fallbackQuarter.start, quarterYear) : false);
+                      const isUpcoming = Boolean(period.upcoming);
                       return (
                         <tr key={period.key} className="border-b border-slate-100">
                           <td className="px-4 py-4 font-medium text-slate-900">{period.label}</td>
@@ -1699,200 +1645,12 @@ const LivestockFarmersAnalytics = () => {
         </DialogContent>
       </Dialog>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card className="border-0 shadow-lg bg-white">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base text-gray-800">
-              <Users className="h-5 w-5 text-blue-900" />
-              Farmers by Gender
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={250}>
-              <PieChart>
-                <Pie
-                  data={genderData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={100}
-                  paddingAngle={2}
-                  dataKey="value"
-                  label={renderCustomizedLabel}
-                  labelLine={false}
-                >
-                  {genderData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip formatter={(value: number) => [value, "Farmers"]} />
-                <Legend />
-              </PieChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-lg bg-white">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base text-gray-800">
-              <Beef className="h-5 w-5 text-red-900" />
-              Animal Census
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {animalCensusData.length > 0 ? (
-              <>
-                <div className="mx-auto h-[280px] w-full">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie
-                        data={animalCensusData}
-                        cx="50%"
-                        cy="50%"
-                        outerRadius={108}
-                        paddingAngle={2}
-                        dataKey="value"
-                        label={renderCustomizedLabel}
-                        labelLine={false}
-                        startAngle={90}
-                        endAngle={-270}
-                        stroke="#ffffff"
-                        strokeWidth={2}
-                      >
-                        {animalCensusData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.color} />
-                        ))}
-                      </Pie>
-                      <Tooltip content={renderAnimalCensusTooltip} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-
-                <div className="mt-2 flex flex-wrap justify-center gap-2">
-                  {animalCensusData.map((item) => (
-                    <div
-                      key={item.name}
-                      className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700"
-                    >
-                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                      <span>{item.name}</span>
-                      <span className="font-semibold text-slate-900">{item.value.toLocaleString()}</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="flex h-[280px] items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-500">
-                No data available yet
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-lg bg-white">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base text-gray-800">
-              <Activity className="h-5 w-5 text-orange-600" />
-              Farmers vs Livestock (Weekly Trend)
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={weeklyPerformanceData}>
-                <defs>
-                  <linearGradient id="colorFarmers" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={COLORS.navy} stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor={COLORS.navy} stopOpacity={0}/>
-                  </linearGradient>
-                  <linearGradient id="colorAnimals" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={COLORS.orange} stopOpacity={0.8}/>
-                    <stop offset="95%" stopColor={COLORS.orange} stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                <XAxis 
-                  dataKey="name" 
-                  fontSize={11}
-                  tick={{ fill: '#6b7280' }}
-                />
-                <YAxis 
-                  fontSize={11} 
-                  tick={{ fill: '#6b7280' }}
-                />
-                <Tooltip 
-                  cursor={{fill: 'transparent'}}
-                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                />
-                <Legend 
-                  verticalAlign="top" 
-                  height={40}
-                  iconType="circle"
-                  iconSize={8}
-                  wrapperStyle={{ fontSize: '11px' }}
-                />
-                <Area 
-                  type="monotone" 
-                  dataKey="farmers" 
-                  stroke={COLORS.navy} 
-                  fillOpacity={1} 
-                  fill="url(#colorFarmers)" 
-                  strokeWidth={2}
-                  name="Farmers" 
-                />
-                <Area 
-                  type="monotone" 
-                  dataKey="animals" 
-                  stroke={COLORS.orange} 
-                  fillOpacity={1} 
-                  fill="url(#colorAnimals)" 
-                  strokeWidth={2}
-                  name="Livestock" 
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-
-        <Card className="border-0 shadow-lg bg-white">
-          <CardHeader className="pb-2">
-            <CardTitle className="flex items-center gap-2 text-base text-gray-800">
-              <Map className="h-5 w-5 text-blue-900" />
-              Subcounty Performance
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={subcountyPerformanceData}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f3f4f6" />
-                <XAxis 
-                  dataKey="name" 
-                  fontSize={11}
-                  tick={{ fill: '#6b7280' }}
-                  angle={-45}
-                  textAnchor="end"
-                  height={80}
-                />
-                <YAxis 
-                  fontSize={11} 
-                  tick={{ fill: '#6b7280' }}
-                />
-                <Tooltip 
-                  cursor={{fill: 'transparent'}}
-                  contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)' }}
-                />
-                <Legend 
-                  verticalAlign="top" 
-                  height={40}
-                  iconType="circle"
-                  iconSize={8}
-                  wrapperStyle={{ fontSize: '11px' }}
-                />
-                <Bar dataKey="value" name="Farmers" fill={COLORS.navy} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </CardContent>
-        </Card>
-      </div>
+      <DashboardInsights
+        accessibleProgrammes={accessibleProgrammes}
+        selectedProgramme={activeProgram}
+        title="Progress Dashboard Insights"
+        description="Dated insights shared from the performance dashboard overview."
+      />
     </div>
   );
 };
